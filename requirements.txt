@@ -1,3 +1,4 @@
 anthropic>=0.40
 resend>=2.0
 python-dotenv>=1.0
+pydantic>=2.0

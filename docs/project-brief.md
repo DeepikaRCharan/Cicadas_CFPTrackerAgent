@@ -30,7 +30,7 @@ Every piece of scope falls into exactly one of these. If unsure where something 
 **Can be mocked or triggered manually if automation isn't finished:**
 
 - The monthly GitHub Actions cron itself — trigger via `workflow_dispatch` live in the demo instead of waiting on a real schedule
-- Email delivery — if Resend/SendGrid isn't wired up, show the notification content that *would* have been sent (log it, print it, whatever's fastest) rather than a live inbox
+- Email delivery — if Resend isn't wired up, print the rendered email that *would* have been sent rather than showing a live inbox. The renderer itself is not mockable: the printed output must come from the same template the real email uses
 - The daily deadline-watcher — demo by manually running it against a tracker entry with a synthetic near-term deadline, rather than waiting on elapsed real days
 - Discovery breadth — if open-ended web search across many venue types proves flaky, narrowing the search scope for the demo is fine
 
@@ -39,7 +39,7 @@ Every piece of scope falls into exactly one of these. If unsure where something 
 - Multi-bucket (two-tier) classification — schema supports it; a real example isn't required for the demo
 - The full classify eval set / stability check / extraction eval as a formal, repeatable suite — one worked example of the reasoning holding up is enough for the demo; build the fuller version only with time to spare
 - Staleness-based closure for rolling (no-deadline) entries — noted as a future addition, not v1
-- README polish beyond the authorship disclosure requirement below
+- README polish beyond the authorship disclosure and setup sections below
 - Anything resembling a hosted app, multi-user support, or UI beyond the repo itself
 
 ## Architecture decisions
@@ -49,8 +49,9 @@ Every piece of scope falls into exactly one of these. If unsure where something 
 - **No MCP in v1.** Built-in web search covers discovery. MCP is a plausible later extension (Gmail for inbox monitoring, GitHub for the commit-back step) — not needed now.
 - **Storage is the repo itself.** `tracker.json` lives in git, not on the researcher's machine — GitHub Actions runners are ephemeral, so each run pulls the repo, updates the tracker, commits back.
 - **Scheduling — GitHub Actions.** Monthly cron for the main loop. A second, daily workflow (no LLM calls at all — plain date logic) for the deadline watcher. Both should support `workflow_dispatch` for manual triggering.
-- **Notifications — a transactional email API** (Resend or SendGrid free tier), not raw SMTP.
-- **Secrets** — `.env` locally (gitignored), GitHub Actions repository secrets for the scheduled run. Anthropic API key and the email service key both need this.
+- **Notifications — Resend free tier**, sending from Resend's default `onboarding@resend.dev` sender, not raw SMTP and no custom domain. That sender can only deliver to the email address tied to the Resend account, so each user runs their own Resend account and sets `NOTIFY_TO` to that account's address. A send to any other address is rejected (403) — it must fail the run visibly, never be swallowed.
+- **Secrets** — `.env` locally (gitignored), GitHub Actions repository secrets for the scheduled run. Three values: `ANTHROPIC_API_KEY`, `RESEND_API_KEY`, `NOTIFY_TO`. No email address is hardcoded anywhere in the code; the recipient comes only from `NOTIFY_TO`.
+- **Handing Cicadas to another user** (e.g. the course instructor) — they get their own copy of the repo, set their own three secrets (so API usage bills to them and email lands in their inbox), put their own paper(s) in `profiles/`, start from an empty `tracker.json`, and enable Actions (off by default on a fork). Nothing is shared with the original repo at runtime. This is single-user handoff, not multi-user deployment — the latter stays out of scope.
 - **Build tool vs. runtime, kept distinct.** Claude Code writes the code interactively; it is not part of the finished agent. The finished script calls the Anthropic API directly and runs independent of Claude Code being open.
 
 ## Data model
@@ -79,8 +80,17 @@ One entry per conference/venue. Facts about the venue are stored once, in `extra
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "last_run": "2026-10-01T09:00:00Z",
+  "profiles": {
+    "elephant-corridors": {
+      "paper_bucket": ["corporate_institutional"],
+      "paper_bucket_cues": ["...", "...", "..."],
+      "paper_bucket_reasoning": "...",
+      "profile_hash": "...", "classified_at": "...",
+      "snapshot_sent": "2026-10-01 | null"
+    }
+  },
   "conferences": [
     {
       "id": "example-stem-education-2027",
@@ -116,6 +126,8 @@ One entry per conference/venue. Facts about the venue are stored once, in `extra
   ]
 }
 ```
+
+**`profiles` block.** Classify's read of the paper itself (bucket, 3–4 cues, reasoning) is agent output, so it lives here in the tracker, not in the researcher-authored `profiles/<id>.json`. It's the cache for "read the paper once per profile," and it's what the first-run snapshot renders from. `snapshot_sent` is how the notifier knows the snapshot already went out — null means the next email for this profile carries it. A changed `profile_hash` (revision) re-classifies the paper but does not resend the snapshot. A swapped-out profile's block stays, frozen, like its tracker entries.
 
 A candidate assigned two buckets carries two keys under `fit_by_tier`. Never average across buckets — a validator checking a written entry branches on what `venue_tier` actually contains, rather than assuming a fixed key set.
 
@@ -187,6 +199,20 @@ Steps 3–6 repeat per candidate found in step 2.
 
 This lets the researcher catch a misread immediately rather than trusting it silently for months. Every notification after the first — not just the first — shows the full per-dimension breakdown for each matched conference, not just the combined fitness score.
 
+**Email layout — fixed in code, never composed by the LLM.** The LLM's job ends at writing schema-validated fields into `tracker.json`. A deterministic template renders every email from those fields, so the layout is identical run after run and only the reasoning text varies. Conference table columns, in order:
+
+| Column | Source field |
+|---|---|
+| Conference | `name` |
+| Bucket(s) | `extraction.venue_tier` |
+| Fitness | `fit_by_tier.<bucket>.overall` (one row per bucket if multi-bucket) |
+| Per-dimension scores | `fit_by_tier.<bucket>.<dimension>` — score + reasoning |
+| Deadline | `extraction.deadline`, or "Rolling" when `has_deadline: false` |
+| URL | `url` |
+| Status | `matches.<profile>.decision` |
+
+The first-run snapshot renders above the table as a separate block, from the `profiles` block. The daily deadline watcher uses the same template — no LLM involved. If a column needs a field the schema doesn't have, add it to the schema first; the template never computes or infers content.
+
 ## Deadline watcher and closure
 
 Separate daily GitHub Actions workflow. Reads `tracker.json` only — **no LLM, no web search**, plain date arithmetic. Reuses the email code. Runs at a different hour than the monthly workflow so they never commit at once.
@@ -232,19 +258,23 @@ The README must state, per profile, one line each:
 - **Elephant corridors** — Gemini-generated; used as a genuine tier-ambiguity stress test.
 - **Immune-tolerance paper** — real, published research, not the researcher's own; used purely to exercise classify against an unambiguous academic case.
 
+## Setup section (README requirement)
+
+The README must include a short setup section that lets someone else run their own copy: create a Resend account; set the three secrets (`ANTHROPIC_API_KEY`, `RESEND_API_KEY`, `NOTIFY_TO` = the Resend account's email) locally in `.env` and as GitHub Actions secrets; replace the files in `profiles/` with their own paper(s), max two; reset `tracker.json` to empty; enable Actions. Also note that a monthly spend cap on their own Anthropic Console is recommended.
+
 ## Build order (by dependency, not calendar)
 
-1. Tracker schema + profile schema on disk, validated by hand against the JSON shapes above
+1. Tracker schema (including the `profiles` block) + profile schema on disk, validated by hand against the JSON shapes above; confirm every email-table column maps to a schema field
 2. Extraction working end to end against one real, hardcoded venue page
 3. Classify working against both demo profiles + a couple of real candidates, reasoning logged and legible
 4. Judge-fit wired to classify's bucket output, per-bucket dimensions applied correctly
 5. Tracker read/write, idempotent, tested with a second run against unchanged input
-6. First-run snapshot output
-7. Email sending, tested standalone before wiring into notify logic
+6. Email template renderer — pure function from tracker fields to email body, snapshot block included; tested by printing output, no sending
+7. Email sending, tested standalone before wiring into notify logic — sends whatever the renderer produced to `NOTIFY_TO`, nothing more; confirm a rejected send surfaces as a visible failure
 8. Web search wired into discovery, full loop running end to end
 9. GitHub Actions: monthly workflow + `workflow_dispatch`, commit-back
 10. Deadline watcher: daily workflow, week-before + closure logic, tested against a synthetic near-term deadline
-11. README (incl. authorship disclosure)
+11. README (incl. authorship disclosure and setup section)
 12. Eval sets — classify and extraction — at minimum one worked example each; fuller suite if time allows
 
 If time runs out, stop after whichever numbered item is last solid and demo from there — see Demo tiers for what's allowed to be mocked instead of finished.
@@ -258,16 +288,20 @@ If time runs out, stop after whichever numbered item is last solid and demo from
 - Repo created (private), standard Python `.gitignore`, README stub in place (needs alignment — see below)
 - Git/Python/Node environment set up and verified
 - `src/config.py` — centralizes model choice (Haiku 4.5 for extraction, Sonnet 5 for judging — declared, not yet called from anywhere) and `TRACKER_PATH`. Matches this brief's model-tiering decision exactly.
-- `requirements.txt` — `anthropic`, `resend`, `python-dotenv`
+- `requirements.txt` — `anthropic`, `resend`, `python-dotenv`, `pydantic`
 - `src/llm.py` — the single `call_llm()` wrapper every model call routes through; reads the API key from env/`.env`; logs input/output token counts per call. This is the "every call goes through one wrapper that logs usage" guardrail, already satisfied at the plumbing level.
+- `src/tracker_schema.py` — Pydantic schema for `tracker.json` at `schema_version: 3`: the top-level `profiles` block (`ProfileClassification`), per-bucket `fit_by_tier` models (one class per bucket's own dimension set, never a fixed shared shape), the decision-states enum, extraction fields. Validated by hand against this brief's example JSON, plus integrity checks the brief calls out explicitly: rolling vs. unfindable-deadline can't be conflated, `overall` must equal the simple average (no hand-tuned weights), `schema_version` is pinned. No extraction/classify/judge-fit logic writes into it yet.
+- `src/profile_schema.py` — Pydantic schema for `profiles/<id>.json` (moved from `profiles/schema.py`; `profiles/` now holds only researcher-authored JSON, no code). Includes `content_hash()`, the `profile_hash` fingerprint used by both `fit_by_tier` entries and the `profiles` block.
+- Email layout table checked column-by-column against the schema — every column maps to an existing field (`name`, `extraction.venue_tier`, `fit_by_tier.<bucket>.overall`, per-dimension `DimensionScore`s, `extraction.deadline`/`has_deadline`, `url`, `matches.<profile>.decision`). No gaps found, nothing added silently.
+- `.env.example` added, listing `ANTHROPIC_API_KEY`, `RESEND_API_KEY`, `NOTIFY_TO` as placeholders. `.env` confirmed covered by `.gitignore` (`git check-ignore -v .env` resolves it).
 - This brief and the CLAUDE.md pointing to it are written; not yet pushed to GitHub as of the last check
 
 **Not yet done — none of the actual pipeline exists yet:**
 
 - Extraction, classify, judge-fit — no logic for any of the three
-- `tracker.json` and tracker read/write logic
-- `profiles/` folder and both demo profile files
-- Email sending (dependency installed, nothing calls it yet)
+- `tracker.json` itself doesn't exist yet (schema is defined, no file written)
+- `profiles/` folder exists but is empty — neither demo profile file has been written
+- Email template renderer and email sending — dependency installed, nothing calls it yet
 - GitHub Actions workflows — monthly loop and daily deadline watcher, neither started
 - Discovery (web search)
 - `tests/`
@@ -275,6 +309,5 @@ If time runs out, stop after whichever numbered item is last solid and demo from
 
 **Repo hygiene to fix, not just build:**
 
-- No `.env.example` — this brief expects one; add it before any more keys get added, so the shape of required secrets is documented without exposing values
-- Confirm `.env` is actually covered by the current `.gitignore` rather than assuming the standard template caught it
-- README currently references `paper_profile.json`; this brief uses `profiles/<id>.json`. Line these up once `profiles/` exists — the authorship disclosure requirement also belongs here and hasn't landed yet either
+- Resend account not yet created
+- README currently references `paper_profile.json`; this brief uses `profiles/<id>.json`. Line these up once `profiles/` has real files — the authorship disclosure and setup-section requirements also belong here and haven't landed yet either
