@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Cicadas: per-run extraction traces (fetched page text, raw model responses)
+logs/
