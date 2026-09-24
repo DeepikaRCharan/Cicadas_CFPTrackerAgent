@@ -8,9 +8,10 @@ ProfileMatch per profile that has been scored against it, keyed by profile
 id under `matches`.
 
 This file defines shape and the data-integrity invariants the brief states
-outright (deadline vs. rolling, equal-weighted overall, decision ownership).
-It does not implement extraction, classify, or judge-fit — those write into
-these shapes later.
+outright (deadline vs. rolling, equal-weighted overall, decision ownership,
+cross-references between conferences/matches/profiles). It does not
+implement extraction, classify, or judge-fit — those write into these
+shapes later.
 """
 
 from __future__ import annotations
@@ -18,9 +19,18 @@ from __future__ import annotations
 from datetime import date, datetime
 from enum import Enum
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 SCHEMA_VERSION = 3
+
+
+class StrictModel(BaseModel):
+    """Base for every model in this file: unknown fields are rejected
+    outright rather than silently dropped, so a typo or a stray field from a
+    bad LLM write shows up immediately instead of vanishing on the next
+    round-trip through tracker.json."""
+
+    model_config = ConfigDict(extra="forbid")
 
 
 class VenueTier(str, Enum):
@@ -77,7 +87,7 @@ class NotificationReason(str, Enum):
     WEEK_BEFORE = "week_before"
 
 
-class Extraction(BaseModel):
+class Extraction(StrictModel):
     has_deadline: bool
     deadline: date | None = Field(
         None,
@@ -111,9 +121,14 @@ class Extraction(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _missing_fields_imply_incomplete(self) -> "Extraction":
-        if self.missing_fields and self.complete:
+    def _complete_iff_no_missing_fields(self) -> "Extraction":
+        if self.complete and self.missing_fields:
             raise ValueError("complete=True but missing_fields is non-empty")
+        if not self.complete and not self.missing_fields:
+            raise ValueError(
+                "complete=False requires at least one entry in missing_fields — "
+                "'incomplete' with nothing named as missing isn't a valid flag"
+            )
         return self
 
     @model_validator(mode="after")
@@ -132,7 +147,7 @@ class Extraction(BaseModel):
         return self
 
 
-class DimensionScore(BaseModel):
+class DimensionScore(StrictModel):
     score: int = Field(..., ge=0, le=100)
     reasoning: str = Field(
         ...,
@@ -141,13 +156,23 @@ class DimensionScore(BaseModel):
     )
 
 
-class TierFitBase(BaseModel):
+class TierFitBase(StrictModel):
     """Fields every bucket's fit score carries, regardless of which extra
     dimensions that bucket adds. Never instantiated directly — see the four
     bucket-specific subclasses below."""
 
     theme_alignment: DimensionScore
-    overall: int = Field(..., ge=0, le=100)
+    overall: int = Field(
+        0,
+        description=(
+            "Computed as the simple average of this bucket's dimension "
+            "scores (brief: equal weighting, no hand-tuned weights). Always "
+            "recomputed after validation — never supplied-and-checked, so "
+            "any value passed in here is overwritten, not rejected. No "
+            "range constraint here on purpose: the recomputed average of "
+            "0-100 dimension scores is always in range by construction."
+        ),
+    )
     scored_at: datetime
     profile_hash: str = Field(
         ...,
@@ -156,20 +181,14 @@ class TierFitBase(BaseModel):
     )
 
     @model_validator(mode="after")
-    def _overall_is_simple_average(self) -> "TierFitBase":
+    def _compute_overall(self) -> "TierFitBase":
         dims = [
             value
             for name, value in self.__dict__.items()
             if isinstance(value, DimensionScore)
         ]
         if dims:
-            expected = round(sum(d.score for d in dims) / len(dims))
-            if self.overall != expected:
-                raise ValueError(
-                    f"overall={self.overall} does not match the simple average of "
-                    f"this bucket's dimension scores ({expected}) — brief requires "
-                    "equal weighting, no hand-tuned weights"
-                )
+            self.overall = round(sum(d.score for d in dims) / len(dims))
         return self
 
 
@@ -190,6 +209,11 @@ class CorporateInstitutionalFit(TierFitBase):
 
 
 class OtherAvenuesFit(TierFitBase):
+    no_other_fit_reasoning: str = Field(
+        ...,
+        min_length=1,
+        description="Why nothing else fit — required whenever a candidate lands in Other Avenues (brief: 'always with reasoning for why nothing else fit').",
+    )
     low_confidence: bool = Field(
         True,
         description="Theme-alignment-only scores are a signal to glance at manually, never fully trusted.",
@@ -211,13 +235,13 @@ TIER_FIT_MODEL: dict[VenueTier, type[TierFitBase]] = {
 }
 
 
-class NotificationEntry(BaseModel):
+class NotificationEntry(StrictModel):
     date: date
     reason: NotificationReason
     deadline: date | None = None
 
 
-class ProfileClassification(BaseModel):
+class ProfileClassification(StrictModel):
     """Classify's read of the paper itself — the top-level `profiles` block,
     keyed by profile id. The cache for "read the paper once per profile"
     (brief, Architecture decisions > Model tiering) and what the first-run
@@ -260,16 +284,21 @@ class ProfileClassification(BaseModel):
         return self
 
 
-class ProfileMatch(BaseModel):
+class ProfileMatch(StrictModel):
     """Everything about fit and the researcher's relationship to one
     conference, for one profile. Keyed by profile id under
     ConferenceEntry.matches — never merged across profiles."""
 
     fit_by_tier: dict[VenueTier, TierFit] = Field(
-        ...,
-        min_length=1,
+        default_factory=dict,
         max_length=2,
-        description="One key per bucket assigned by classify; scored independently, never averaged across buckets.",
+        description=(
+            "One key per bucket assigned by classify; scored independently, "
+            "never averaged across buckets. Empty only when the venue's "
+            "extraction is incomplete — see ConferenceEntry's validators, "
+            "which also require these keys to equal extraction.venue_tier "
+            "whenever this is non-empty."
+        ),
     )
     decision: DecisionState = DecisionState.PENDING
     notifications: list[NotificationEntry] = Field(default_factory=list)
@@ -287,7 +316,7 @@ class ProfileMatch(BaseModel):
         return self
 
 
-class ConferenceEntry(BaseModel):
+class ConferenceEntry(StrictModel):
     id: str = Field(
         ...,
         min_length=1,
@@ -303,10 +332,37 @@ class ConferenceEntry(BaseModel):
         description="Keyed by profile id, not conference — a candidate found under two profiles' searches gets two match entries here, still one ConferenceEntry.",
     )
 
+    @model_validator(mode="after")
+    def _fit_by_tier_keys_match_venue_tier(self) -> "ConferenceEntry":
+        declared = set(self.extraction.venue_tier)
+        for profile_id, match in self.matches.items():
+            keys = set(match.fit_by_tier.keys())
+            if keys and keys != declared:
+                raise ValueError(
+                    f"matches[{profile_id!r}].fit_by_tier keys "
+                    f"{sorted(k.value for k in keys)} must equal "
+                    f"extraction.venue_tier {sorted(k.value for k in declared)}"
+                )
+        return self
 
-class TrackerFile(BaseModel):
+    @model_validator(mode="after")
+    def _empty_fit_by_tier_only_when_incomplete(self) -> "ConferenceEntry":
+        for profile_id, match in self.matches.items():
+            if not match.fit_by_tier and self.extraction.complete:
+                raise ValueError(
+                    f"matches[{profile_id!r}].fit_by_tier is empty but "
+                    "extraction.complete=True — empty fit_by_tier is only valid "
+                    "when the venue's extraction is incomplete (flagged, not scored)"
+                )
+        return self
+
+
+class TrackerFile(StrictModel):
     schema_version: int = SCHEMA_VERSION
-    last_run: datetime
+    last_run: datetime | None = Field(
+        None,
+        description="Null before the first run has ever happened, so a brand-new, empty tracker.json validates.",
+    )
     profiles: dict[str, ProfileClassification] = Field(
         default_factory=dict,
         description="Keyed by profile id. One entry per profile ever onboarded, including swapped-out ones (frozen, not removed).",
@@ -319,4 +375,15 @@ class TrackerFile(BaseModel):
             raise ValueError(
                 f"schema_version {self.schema_version} != expected {SCHEMA_VERSION}; migrate before writing"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _match_profile_ids_exist_in_profiles(self) -> "TrackerFile":
+        for conference in self.conferences:
+            for profile_id in conference.matches:
+                if profile_id not in self.profiles:
+                    raise ValueError(
+                        f"conferences[{conference.id!r}].matches has key {profile_id!r} "
+                        "which has no corresponding entry in the top-level profiles block"
+                    )
         return self

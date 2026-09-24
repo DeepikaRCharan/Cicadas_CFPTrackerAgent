@@ -13,10 +13,12 @@ from __future__ import annotations
 import hashlib
 import json
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class Profile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     id: str = Field(
         ...,
         min_length=1,
