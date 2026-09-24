@@ -56,10 +56,12 @@ trade readers; often invite-only or application-gated.
 not a default to reach for lightly."""
 
 PAPER_CLASSIFY_SYSTEM_PROMPT = f"""You are the paper-classify step of Cicadas, a CFP tracker agent. \
-You are given one paper's own title, abstract, keywords, and preferred format. Your job is to decide \
-which bucket the paper's OWN writing -- its register, rigor, and implied audience -- actually belongs to. \
-This is not "where should this paper be submitted" -- it's "what kind of writing is this, read on its own \
-terms." A later step uses your call to judge how well specific venues fit this paper.
+You are given one paper's own title, abstract, and keywords. Your job is to decide which bucket the \
+paper's OWN writing -- its register, rigor, and implied audience -- actually belongs to. This is not \
+"where should this paper be submitted" -- it's "what kind of writing is this, read on its own terms." A \
+later step uses your call to judge how well specific venues fit this paper; the researcher's own format \
+preference (poster, full paper, etc.) belongs to that later fit judgment, not to this call, and is \
+deliberately withheld from you here.
 
 {BUCKET_DEFINITIONS}
 
@@ -197,9 +199,12 @@ def _coerce_to_list(tool_output: dict, field: str) -> dict:
     single-bucket call sometimes comes back as a bare string instead of a
     one-item list -- a representation slip the model makes despite the
     schema, not a content guess. Normalizing the shape here isn't filling in
-    unstated content; the bucket value itself is untouched."""
+    unstated content; the bucket value itself is untouched. Logs visibly
+    every time it actually changes something, so a recurring slip stays
+    check-able instead of silently absorbed run after run."""
     value = tool_output.get(field)
     if isinstance(value, str):
+        print(f"[classify] WARNING: model returned {field}={value!r} as a bare string, not a list -- coercing to [{value!r}]")
         tool_output = {**tool_output, field: [value]}
     return tool_output
 
@@ -224,8 +229,7 @@ def classify_paper(profile: Profile) -> ProfileClassification:
                 "content": (
                     f"Title: {profile.title}\n\n"
                     f"Abstract:\n{profile.abstract}\n\n"
-                    f"Keywords: {', '.join(profile.keywords)}\n\n"
-                    f"Preferred format: {profile.preferred_format}"
+                    f"Keywords: {', '.join(profile.keywords)}"
                 ),
             }
         ],
