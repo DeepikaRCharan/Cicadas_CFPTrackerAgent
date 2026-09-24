@@ -12,6 +12,7 @@ Cicadas watches for conference and publication calls-for-papers that fit a given
 - **A monthly spend cap is set on the Anthropic Console.** Design around it existing — don't add retry loops or fallback logic that could quietly burn through it.
 - **Tracked history is never deleted.** Swapping a paper profile for a different one freezes that profile's old tracker entries; it does not remove them. Only a revision of the *same* paper triggers re-scoring.
 - **No silent failures.** A run that errors logs visibly, somewhere check-able. Since notifications only fire above a fitness threshold, a silent failure and "genuinely nothing found" must never look identical.
+- **`decisions.json` belongs to the researcher.** The agent reads it every run and never writes it. `tracker.json` belongs to the agent; the researcher never hand-edits it.
 - **The LLM never composes emails.** It writes schema-validated fields; a fixed template renders every notification. See "Email layout" in the brief.
 - **The rubric stays qualitative.** Dimensions must require the model to read and weigh text, not collapse into a keyword-match or numeric threshold. This is what keeps the classify/judge steps agentic rather than scripted — see "What counts as agentic" in the brief before changing any scoring logic.
 

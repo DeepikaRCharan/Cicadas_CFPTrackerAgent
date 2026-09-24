@@ -26,6 +26,7 @@ Every piece of scope falls into exactly one of these. If unsure where something 
 - Classify's reasoning output (bucket + textual cues) — must be real model output, not a canned example
 - The first-run snapshot (see Workflow) shown for at least one profile
 - Tracker read/write correctness — schema-valid, idempotent on a second run
+- The researcher decision round-trip: edit one line in `decisions.json` on GitHub, re-run, and the tracker and next email reflect it
 
 **Can be mocked or triggered manually if automation isn't finished:**
 
@@ -48,10 +49,10 @@ Every piece of scope falls into exactly one of these. If unsure where something 
 - **Model tiering.** A lighter/faster model for extraction (structured parsing, not judgment). The stronger reasoning model for classify and judge-fit, where nuance matters. Classify adds a third LLM call per candidate (extract → classify → judge-fit); the paper-side half of classify runs once per profile and is cached, the venue-side half runs once per candidate.
 - **No MCP in v1.** Built-in web search covers discovery. MCP is a plausible later extension (Gmail for inbox monitoring, GitHub for the commit-back step) — not needed now.
 - **Storage is the repo itself.** `tracker.json` lives in git, not on the researcher's machine — GitHub Actions runners are ephemeral, so each run pulls the repo, updates the tracker, commits back.
-- **Scheduling — GitHub Actions.** Monthly cron for the main loop. A second, daily workflow (no LLM calls at all — plain date logic) for the deadline watcher. Both should support `workflow_dispatch` for manual triggering.
+- **Scheduling — GitHub Actions.** The monthly run fires on the **7th of every month**, whatever the weekday: discovery, re-check of tracked open venues, then the digest. A second, daily workflow (no LLM calls at all — plain date logic) for the deadline watcher. Both support `workflow_dispatch` for manual triggering. No daily or weekly web scanning: discovery and re-checks are monthly only, which keeps LLM spend to one run a month.
 - **Notifications — Resend free tier**, sending from Resend's default `onboarding@resend.dev` sender, not raw SMTP and no custom domain. That sender can only deliver to the email address tied to the Resend account, so each user runs their own Resend account and sets `NOTIFY_TO` to that account's address. A send to any other address is rejected (403) — it must fail the run visibly, never be swallowed.
 - **Secrets** — `.env` locally (gitignored), GitHub Actions repository secrets for the scheduled run. Three values: `ANTHROPIC_API_KEY`, `RESEND_API_KEY`, `NOTIFY_TO`. No email address is hardcoded anywhere in the code; the recipient comes only from `NOTIFY_TO`.
-- **Handing Cicadas to another user** (e.g. the course instructor) — they get their own copy of the repo, set their own three secrets (so API usage bills to them and email lands in their inbox), put their own paper(s) in `profiles/`, start from an empty `tracker.json`, and enable Actions (off by default on a fork). Nothing is shared with the original repo at runtime. This is single-user handoff, not multi-user deployment — the latter stays out of scope.
+- **Handing Cicadas to another user** (e.g. the course instructor) — they get their own copy of the repo, set their own three secrets (so API usage bills to them and email lands in their inbox), put their own paper(s) in `profiles/`, start from an empty `tracker.json` and an empty `decisions.json`, and enable Actions (off by default on a fork). Nothing is shared with the original repo at runtime. This is single-user handoff, not multi-user deployment — the latter stays out of scope.
 - **Build tool vs. runtime, kept distinct.** Claude Code writes the code interactively; it is not part of the finished agent. The finished script calls the Anthropic API directly and runs independent of Claude Code being open.
 
 ## Data model
@@ -97,10 +98,16 @@ One entry per conference/venue. Facts about the venue are stored once, in `extra
       "name": "...", "url": "...",
       "first_seen": "...", "last_checked": "...",
       "extraction": {
-        "has_deadline": true, "deadline": "2026-12-15 | null",
-        "submission_type": "...", "format_requirements": "...",
-        "fees": "...", "mode": "in-person | virtual | hybrid",
-        "theme": "...",
+        "has_deadline": true,
+        "deadline": "2026-12-15 | null",
+        "deadline_precision": "exact | month | null",
+        "deadline_as_stated": "15 December 2026 | null",
+        "submission_opens": "November 2026 | null",
+        "submission_status": "not_yet_open | open | closed | unknown",
+        "submission_type": "...", "theme": "...",
+        "location": "Florence, Italy | null",
+        "format_requirements": "... | null",
+        "fees": "... | null", "mode": "in-person | virtual | hybrid | null",
         "venue_tier": ["academic_practitioner"],
         "venue_tier_reasoning": "...",
         "complete": true, "missing_fields": []
@@ -131,6 +138,25 @@ One entry per conference/venue. Facts about the venue are stored once, in `extra
 
 A candidate assigned two buckets carries two keys under `fit_by_tier`. Never average across buckets — a validator checking a written entry branches on what `venue_tier` actually contains, rather than assuming a fixed key set.
 
+### Researcher decisions (`decisions.json`)
+
+A small file at the repo root that **only the researcher edits** — the agent reads it, never writes it. One line per conference the researcher has a view on, keyed by conference `id` (shown in every digest row):
+
+```json
+{
+  "eci-2027": "applying",
+  "example-summit-2027": "skipped"
+}
+```
+
+- Allowed values: `applying`, `applied`, `skipped` — the researcher's three states only. `pending` and `unconfirmed` are agent-only and are an error here.
+- Read at the start of **every** run, monthly and daily watcher, before anything else. Its values are copied into `matches.<profile>.decision` for every profile under that conference.
+- A key that isn't a tracked conference `id`, or a value outside the three allowed, stops the run with a visible error naming the bad line. Never guessed, never skipped.
+- No line for a conference means no researcher decision: it stays `pending` (or `unconfirmed` once the agent closes it).
+- A researcher decision always wins over the agent's: setting `applied` or `skipped` on an `unconfirmed` entry is allowed and simply records the truth.
+- Known limitation: one decision per conference, applied to every profile matched to it. Per-profile decisions are not in v1.
+- Edited on GitHub's website (pencil icon → commit). Keeping it separate from `tracker.json` means the researcher never touches the agent's file, so a hand-edit can't collide with the agent's monthly commit or break the tracker schema.
+
 **Decision states** — set by the agent or the researcher, never both for the same field:
 
 | Decision | Set by | Meaning | Reminders |
@@ -144,11 +170,14 @@ A candidate assigned two buckets carries two keys under `fit_by_tier`. Never ave
 **Rules:**
 
 - **Identity.** `id` = normalized name + year. A found conference counts as already-tracked if its `id` *or* its URL matches either an existing entry. Domain alone is never enough (hosts like EasyChair carry many conferences) — merging two real conferences silently is worse than an occasional duplicate.
-- **Ownership.** Agent creates entries (`pending`), writes `extraction`/`matches`/`notifications`, and makes exactly one status change itself: closing to `unconfirmed`. The researcher sets `applying`/`applied`/`skipped` and writes `notes`.
+- **Ownership.** Agent creates entries (`pending`), writes `extraction`/`matches`/`notifications`, and makes exactly one status change itself: closing to `unconfirmed`. The researcher sets `applying`/`applied`/`skipped` via `decisions.json` only; the agent copies them in and never infers them. `notes` stays in the schema but is unused in v1.
 - **Idempotency.** A re-run updates an existing entry, never duplicates one, and never repeats an email already logged in `notifications`.
 - **Per profile.** A candidate is scored against the profile whose search surfaced it. If a second profile's search later finds an already-tracked conference, that adds a second entry under `matches`, not a second conference.
 - **Stale scores.** `profile_hash` fingerprints the profile at scoring time. Open entries with a mismatched hash get re-scored on the next run; closed entries keep their score as history.
-- **Incomplete extraction.** Missing fields → `complete: false`, listed in `missing_fields`, flagged rather than scored.
+- **Critical vs. optional fields.** Critical: the deadline (when `has_deadline: true`), `theme`, `submission_type`. Optional: `location`, `mode`, `fees`, `format_requirements`, `submission_opens`. Any field not stated on the page is null and listed in `missing_fields` — never guessed. `complete: false` only when a **critical** field is missing; a venue missing only optional fields is still scored. Incomplete venues are flagged rather than scored.
+- **Deadline precision.** `deadline_as_stated` is always the page's own wording. An exact date → `deadline_precision: exact`. A month only ("February 2027") → `deadline_precision: month`, with `deadline` set to the first day of that month. A later run that finds the exact date upgrades it and counts as `deadline_changed`.
+- **Who fills what.** Extraction (light model) fills the fact fields only. `venue_tier` and `venue_tier_reasoning` are written by classify (stronger model), never by extraction.
+- **Submission status.** `submission_status` records what the page says now: `not_yet_open`, `open`, `closed`, or `unknown`. `submission_opens` keeps the page's wording for when it opens.
 - **`has_deadline: false` is a fact, not a gap.** A genuinely rolling/pitch-based outlet gets `has_deadline: false` — that's real information. A deadline that should exist but wasn't findable on the page is a *different* case: `complete: false`, in `missing_fields`. Don't conflate the two — this distinction is what the extraction eval specifically stress-tests.
 
 ## Venue buckets and rubric
@@ -181,13 +210,14 @@ Equal weighting within whichever dimension set was selected (simple average). Do
 
 **Every run, per profile:**
 
-1. **Trigger** — monthly cron, or `workflow_dispatch` on demand. Same code path either way.
+1. **Trigger** — the 7th of every month, or `workflow_dispatch` on demand. Same code path either way. The first action of every run is syncing `decisions.json` into the tracker (see Researcher decisions).
 2. **Discover** — web search for candidate CFPs/venues matching the profile's topics.
-3. **Extract** — per candidate: deadline (or its genuine absence), submission type, format, fees, mode, theme.
+3. **Extract** — per candidate: deadline (or its genuine absence) and its precision, submission status and opening, submission type, theme, location, format, fees, mode.
+   - **Re-check tracked venues** — every open (`pending` or `applying`) tracked venue is re-fetched and re-extracted (light model only; no re-classify or re-score unless the profile changed). A change to `submission_status` → `open` logs `submissions_opened`; a changed or newly-exact deadline logs `deadline_changed`.
 4. **Classify** — read the paper's own content (once per profile, cached) and the candidate's content separately; infer bucket(s) for each, with reasoning logged for both calls.
-5. **Judge fit** — score against the bucket(s) assigned, using that bucket's dimensions.
+5. **Judge fit** — score against the bucket(s) assigned, using that bucket's dimensions. The model scores each dimension with reasoning; it is never asked for `overall`, which code computes as the simple average.
 6. **Update tracker** — write extraction + fit + reasoning, commit back.
-7. **Notify** — first email only if fitness > 50%, one email per conference listing every profile/bucket it fits. Below threshold: silent tracker update, no email, no periodic "still watching" message.
+7. **Notify** — one digest email per run covering all profiles, always sent, even in a month with nothing new (it then says so, and still carries the Still open list). A conference enters the digest's New section only if fitness > 50%; below that, the tracker updates silently and it never appears. Because the digest always arrives on the 7th, a missing email is itself a visible sign the run failed.
 
 Steps 3–6 repeat per candidate found in step 2.
 
@@ -199,29 +229,58 @@ Steps 3–6 repeat per candidate found in step 2.
 
 This lets the researcher catch a misread immediately rather than trusting it silently for months. Every notification after the first — not just the first — shows the full per-dimension breakdown for each matched conference, not just the combined fitness score.
 
-**Email layout — fixed in code, never composed by the LLM.** The LLM's job ends at writing schema-validated fields into `tracker.json`. A deterministic template renders every email from those fields, so the layout is identical run after run and only the reasoning text varies. Conference table columns, in order:
+**Email layout — fixed in code, never composed by the LLM.** The LLM's job ends at writing schema-validated fields into `tracker.json`. A deterministic template renders every email from those fields, so the layout is identical run after run and only the reasoning text varies. Any null field renders as "Not stated on venue page" — the honest wording comes from the template, never from the model. If a column needs a field the schema doesn't have, add it to the schema first; the template never computes or infers content.
+
+**Monthly digest (sent on the 7th) — three sections, in this order,** with the first-run snapshot block above them when a profile is new:
+
+*1. New this month* — conferences whose `new_fit` is logged this run. Shown here **once only**, with full scores and rationale; never again with rationale.
 
 | Column | Source field |
 |---|---|
 | Conference | `name` |
+| Location | `extraction.location` |
+| Deadline | `extraction.deadline_as_stated`, or "Rolling" when `has_deadline: false` |
+| Submissions open | `extraction.submission_status` + `extraction.submission_opens` |
 | Bucket(s) | `extraction.venue_tier` |
 | Fitness | `fit_by_tier.<bucket>.overall` (one row per bucket if multi-bucket) |
 | Per-dimension scores | `fit_by_tier.<bucket>.<dimension>` — score + reasoning |
-| Deadline | `extraction.deadline`, or "Rolling" when `has_deadline: false` |
-| URL | `url` |
-| Status | `matches.<profile>.decision` |
+| Mode · Fees | `extraction.mode`, `extraction.fees` |
+| Link | `url` |
+| ID | `id` — what the researcher types into `decisions.json` |
 
-The first-run snapshot renders above the table as a separate block, from the `profiles` block. The daily deadline watcher uses the same template — no LLM involved. If a column needs a field the schema doesn't have, add it to the schema first; the template never computes or infers content.
+*2. Updates* — conferences already sent before that logged `submissions_opened` or `deadline_changed` this run. No rationale, no scores.
+
+| Column | Source field |
+|---|---|
+| Conference | `name` |
+| Location | `extraction.location` |
+| What changed | this run's notification `reason` (applications now open / deadline published or changed) |
+| Deadline | `extraction.deadline_as_stated` |
+| Your decision | `matches.<profile>.decision` |
+| Link · ID | `url`, `id` |
+
+*3. Still open* — every tracked venue above the fitness threshold that is `pending` or `applying` and not past its deadline, sorted by deadline. One line each, no LLM involved.
+
+| Column | Source field |
+|---|---|
+| Conference | `name` |
+| Location | `extraction.location` |
+| Deadline | `extraction.deadline_as_stated` |
+| Your decision | `matches.<profile>.decision` |
+| ID | `id` |
+
+**Week-before reminder (daily watcher)** — one email per conference, sent on its own day. It names the conference (name, location, deadline, link, ID, current decision) and adds an **Also coming up** list: every other `pending`/`applying` deadline in the next 14 days (name, location, deadline). Several reminders in one week is expected; each conference is still reminded exactly once.
 
 ## Deadline watcher and closure
 
-Separate daily GitHub Actions workflow. Reads `tracker.json` only — **no LLM, no web search**, plain date arithmetic. Reuses the email code. Runs at a different hour than the monthly workflow so they never commit at once.
+Separate daily GitHub Actions workflow. Reads `decisions.json` then `tracker.json` — **no LLM, no web search**, plain date arithmetic. Reuses the email code. Runs at a different hour than the monthly workflow so they never commit at once.
 
 - **`new_fit`** (monthly run) — first time a match crosses 50%.
-- **`deadline_changed`** (monthly run) — an open, `has_deadline: true` match whose deadline changed since last recorded. Doesn't apply to rolling entries.
-- **`week_before`** (daily watcher) — only `has_deadline: true` entries, `pending` or `applying`, seven days out, sent once per deadline.
-- **Closure** — only `has_deadline: true` entries. Two days after the deadline, any still-open match becomes `unconfirmed`, including ones that never crossed 50% (they were never emailed; their stored fit explains why). Closed entries are never reopened or re-scored, even if rediscovered later.
-- **Rolling entries (`has_deadline: false`)** — no week-before reminder, no date-based closure. Stay `pending` indefinitely until the researcher manually sets `applying`/`applied`/`skipped`. Not re-emailed on `new_fit` more than once.
+- **`submissions_opened`** (monthly run) — a re-check finds `submission_status` changed to `open` on an already-sent venue.
+- **`deadline_changed`** (monthly run) — an open, `has_deadline: true` match whose deadline or its precision changed since last recorded (including month → exact date). Doesn't apply to rolling entries.
+- **`week_before`** (daily watcher) — only `has_deadline: true` entries, `pending` or `applying`, sent once per deadline: seven days before an exact date; for a month-only deadline, seven days before that month starts, labelled "exact date not published."
+- **Closure** — only `has_deadline: true` entries. Two days after the deadline (for a month-only deadline, two days after that month ends), any still-open match becomes `unconfirmed`, including ones that never crossed 50% (they were never emailed; their stored fit explains why). Closed entries are never reopened or re-scored, even if rediscovered later.
+- **Rolling entries (`has_deadline: false`)** — no week-before reminder, no date-based closure. Stay `pending` indefinitely until the researcher sets `applying`/`applied`/`skipped` in `decisions.json`. Not re-emailed on `new_fit` more than once.
 
 Every email logged in `notifications` (date, reason, deadline) — this is how "already sent for this deadline" gets checked.
 
@@ -250,6 +309,12 @@ No separate app. Onboarding is a one-time script per profile. "On/off" and "run 
 
 A hosted web app for other researchers is explicitly out of scope.
 
+## Pinned for later (not v1)
+
+- **Learning from the researcher's decisions** — e.g. noticing that every European venue gets skipped and proposing location as a scoring factor. Must ask the researcher before changing how anything is scored; never adjusts silently.
+- **GitHub Issues as the decision interface** — one Issue per conference, decision set by label, synced the same way as `decisions.json`. Both only ever set `decision`, so switching changes nothing underneath.
+- **A dashboard UI** with a decision dropdown per venue.
+
 ## Authorship disclosure (README requirement)
 
 The README must state, per profile, one line each:
@@ -260,20 +325,20 @@ The README must state, per profile, one line each:
 
 ## Setup section (README requirement)
 
-The README must include a short setup section that lets someone else run their own copy: create a Resend account; set the three secrets (`ANTHROPIC_API_KEY`, `RESEND_API_KEY`, `NOTIFY_TO` = the Resend account's email) locally in `.env` and as GitHub Actions secrets; replace the files in `profiles/` with their own paper(s), max two; reset `tracker.json` to empty; enable Actions. Also note that a monthly spend cap on their own Anthropic Console is recommended.
+The README must include a short setup section that lets someone else run their own copy: create a Resend account; set the three secrets (`ANTHROPIC_API_KEY`, `RESEND_API_KEY`, `NOTIFY_TO` = the Resend account's email) locally in `.env` and as GitHub Actions secrets; replace the files in `profiles/` with their own paper(s), max two; reset `tracker.json` to empty and `decisions.json` to `{}`; enable Actions. Also note that a monthly spend cap on their own Anthropic Console is recommended.
 
 ## Build order (by dependency, not calendar)
 
 1. Tracker schema (including the `profiles` block) + profile schema on disk, validated by hand against the JSON shapes above; confirm every email-table column maps to a schema field
-2. Extraction working end to end against one real, hardcoded venue page
+2. Extraction working end to end against one real, hardcoded venue page (https://eci2027.org/call-for-abstracts/ — exact deadline, month-only opening, no fees or mode stated, and footer links to an unrelated congress)
 3. Classify working against both demo profiles + a couple of real candidates, reasoning logged and legible
 4. Judge-fit wired to classify's bucket output, per-bucket dimensions applied correctly
-5. Tracker read/write, idempotent, tested with a second run against unchanged input
-6. Email template renderer — pure function from tracker fields to email body, snapshot block included; tested by printing output, no sending
+5. Tracker read/write, idempotent, tested with a second run against unchanged input; `decisions.json` sync, including the bad-key and bad-value errors
+6. Email template renderer — pure function from tracker fields to email body: digest (snapshot, New, Updates, Still open) and week-before reminder (with Also coming up); tested by printing output, no sending
 7. Email sending, tested standalone before wiring into notify logic — sends whatever the renderer produced to `NOTIFY_TO`, nothing more; confirm a rejected send surfaces as a visible failure
-8. Web search wired into discovery, full loop running end to end
-9. GitHub Actions: monthly workflow + `workflow_dispatch`, commit-back
-10. Deadline watcher: daily workflow, week-before + closure logic, tested against a synthetic near-term deadline
+8. Web search wired into discovery, re-check of tracked venues, full loop running end to end
+9. GitHub Actions: monthly workflow on the 7th + `workflow_dispatch`, commit-back
+10. Deadline watcher: daily workflow, week-before (exact and month-only) + Also coming up + closure logic, tested against synthetic near-term deadlines
 11. README (incl. authorship disclosure and setup section)
 12. Eval sets — classify and extraction — at minimum one worked example each; fuller suite if time allows
 
@@ -285,29 +350,26 @@ If time runs out, stop after whichever numbered item is last solid and demo from
 
 **Done:**
 
-- Repo created (private), standard Python `.gitignore`, README stub in place (needs alignment — see below)
+- Repo created (private), standard Python `.gitignore` (confirmed to cover `.env`), README stub in place (needs alignment — see below)
 - Git/Python/Node environment set up and verified
-- `src/config.py` — centralizes model choice (Haiku 4.5 for extraction, Sonnet 5 for judging — declared, not yet called from anywhere) and `TRACKER_PATH`. Matches this brief's model-tiering decision exactly.
+- `src/config.py` — centralizes model choice (Haiku 4.5 for extraction, Sonnet 5 for judging) and `TRACKER_PATH`
 - `requirements.txt` — `anthropic`, `resend`, `python-dotenv`, `pydantic`
-- `src/llm.py` — the single `call_llm()` wrapper every model call routes through; reads the API key from env/`.env`; logs input/output token counts per call. This is the "every call goes through one wrapper that logs usage" guardrail, already satisfied at the plumbing level.
-- `src/tracker_schema.py` — Pydantic schema for `tracker.json` at `schema_version: 3`: the top-level `profiles` block (`ProfileClassification`), per-bucket `fit_by_tier` models (one class per bucket's own dimension set, never a fixed shared shape), the decision-states enum, extraction fields. Validated by hand against this brief's example JSON, plus integrity checks the brief calls out explicitly: rolling vs. unfindable-deadline can't be conflated, `overall` must equal the simple average (no hand-tuned weights), `schema_version` is pinned. No extraction/classify/judge-fit logic writes into it yet.
-- `src/profile_schema.py` — Pydantic schema for `profiles/<id>.json` (moved from `profiles/schema.py`; `profiles/` now holds only researcher-authored JSON, no code). Includes `content_hash()`, the `profile_hash` fingerprint used by both `fit_by_tier` entries and the `profiles` block.
-- Email layout table checked column-by-column against the schema — every column maps to an existing field (`name`, `extraction.venue_tier`, `fit_by_tier.<bucket>.overall`, per-dimension `DimensionScore`s, `extraction.deadline`/`has_deadline`, `url`, `matches.<profile>.decision`). No gaps found, nothing added silently.
-- `.env.example` added, listing `ANTHROPIC_API_KEY`, `RESEND_API_KEY`, `NOTIFY_TO` as placeholders. `.env` confirmed covered by `.gitignore` (`git check-ignore -v .env` resolves it).
-- This brief and the CLAUDE.md pointing to it are written; not yet pushed to GitHub as of the last check
+- `src/llm.py` — the single `call_llm()` wrapper every model call routes through; logs input/output token counts per call
+- `.env.example` with `ANTHROPIC_API_KEY`, `RESEND_API_KEY`, `NOTIFY_TO`
+- Build step 1: `src/tracker_schema.py` and `src/profile_schema.py` (Pydantic, `extra="forbid"`, schema v3), with `tests/test_schema.py` (stdlib `unittest`) passing
 
-**Not yet done — none of the actual pipeline exists yet:**
+**Not yet done:**
 
+- Schema update for the decisions made after step 1: extraction's new fields (`deadline_precision`, `deadline_as_stated`, `submission_opens`, `submission_status`, `location`), critical/optional fields, the `submissions_opened` notification reason, and a schema for `decisions.json`
 - Extraction, classify, judge-fit — no logic for any of the three
-- `tracker.json` itself doesn't exist yet (schema is defined, no file written)
-- `profiles/` folder exists but is empty — neither demo profile file has been written
-- Email template renderer and email sending — dependency installed, nothing calls it yet
-- GitHub Actions workflows — monthly loop and daily deadline watcher, neither started
-- Discovery (web search)
-- `tests/`
+- `tracker.json`, `decisions.json`, and tracker read/write logic
+- `profiles/` demo profile files
+- Email renderer and sending
+- GitHub Actions workflows — monthly loop (7th) and daily deadline watcher
+- Discovery (web search) and re-check of tracked venues
 - Eval sets — classify and extraction
 
 **Repo hygiene to fix, not just build:**
 
 - Resend account not yet created
-- README currently references `paper_profile.json`; this brief uses `profiles/<id>.json`. Line these up once `profiles/` has real files — the authorship disclosure and setup-section requirements also belong here and haven't landed yet either
+- README currently references `paper_profile.json`; this brief uses `profiles/<id>.json`. Line these up once `profiles/` exists — the authorship disclosure requirement also belongs here and hasn't landed yet either

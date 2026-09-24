@@ -21,7 +21,7 @@ from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class StrictModel(BaseModel):
@@ -44,6 +44,18 @@ class SubmissionMode(str, Enum):
     IN_PERSON = "in-person"
     VIRTUAL = "virtual"
     HYBRID = "hybrid"
+
+
+class DeadlinePrecision(str, Enum):
+    EXACT = "exact"
+    MONTH = "month"
+
+
+class SubmissionStatus(str, Enum):
+    NOT_YET_OPEN = "not_yet_open"
+    OPEN = "open"
+    CLOSED = "closed"
+    UNKNOWN = "unknown"
 
 
 class DecisionState(str, Enum):
@@ -84,10 +96,24 @@ REMINDER_ELIGIBLE_DECISIONS = frozenset({DecisionState.PENDING, DecisionState.AP
 class NotificationReason(str, Enum):
     NEW_FIT = "new_fit"
     DEADLINE_CHANGED = "deadline_changed"
+    SUBMISSIONS_OPENED = "submissions_opened"
     WEEK_BEFORE = "week_before"
 
 
-class Extraction(StrictModel):
+# Critical fields: complete=False iff one of these is null (brief, Rules >
+# "Critical vs. optional fields"). deadline only counts while has_deadline is
+# True — a null deadline under has_deadline=False is a fact, not a gap.
+CRITICAL_FACT_FIELDS = frozenset({"deadline", "theme", "submission_type"})
+# Optional fields: nullable, never affect `complete`, but still must be
+# named in missing_fields when null — nothing null is ever left unlisted.
+OPTIONAL_FACT_FIELDS = frozenset({"location", "mode", "fees", "format_requirements", "submission_opens"})
+
+
+class ExtractionFacts(StrictModel):
+    """The fact fields extraction (light model) fills. `venue_tier` and
+    `venue_tier_reasoning` are classify's job, never extraction's (brief,
+    Rules > "Who fills what") — see the Extraction subclass below."""
+
     has_deadline: bool
     deadline: date | None = Field(
         None,
@@ -99,11 +125,103 @@ class Extraction(StrictModel):
             "list 'deadline' in missing_fields."
         ),
     )
-    submission_type: str
-    format_requirements: str
-    fees: str
-    mode: SubmissionMode
-    theme: str
+    deadline_precision: DeadlinePrecision | None = Field(
+        None,
+        description=(
+            "Set iff deadline is set. 'month' means only a month was stated "
+            "('February 2027'); deadline is then the 1st of that month. A "
+            "later run finding the exact date upgrades this to 'exact' and "
+            "logs deadline_changed."
+        ),
+    )
+    deadline_as_stated: str | None = Field(
+        None,
+        description="The page's own wording for the deadline, verbatim. Set iff deadline is set.",
+    )
+    submission_opens: str | None = Field(
+        None,
+        description="The page's own wording for when submissions open, e.g. 'November 2026'. Optional field.",
+    )
+    submission_status: SubmissionStatus = Field(
+        ...,
+        description="What the page says right now. 'unknown' covers not-stated — this field is never null.",
+    )
+    submission_type: str | None = None
+    format_requirements: str | None = None
+    fees: str | None = None
+    mode: SubmissionMode | None = None
+    theme: str | None = None
+    location: str | None = None
+    complete: bool
+    missing_fields: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _deadline_rules(self) -> "ExtractionFacts":
+        if not self.has_deadline:
+            if self.deadline is not None or self.deadline_precision is not None or self.deadline_as_stated is not None:
+                raise ValueError(
+                    "has_deadline=False (rolling) but deadline/deadline_precision/"
+                    "deadline_as_stated is set — all three must be null when there is no deadline"
+                )
+            return self
+
+        if self.deadline is not None:
+            if self.deadline_precision is None or self.deadline_as_stated is None:
+                raise ValueError(
+                    "deadline is set but deadline_precision/deadline_as_stated is null — "
+                    "both are required whenever a deadline is present"
+                )
+            if self.deadline_precision == DeadlinePrecision.MONTH and self.deadline.day != 1:
+                raise ValueError(
+                    "deadline_precision=month requires deadline to be the 1st of that month"
+                )
+        else:
+            # has_deadline=True but unfindable on the page — the "different
+            # case" from rolling (brief, Rules): flagged incomplete below,
+            # and precision/as_stated carry no meaning without a deadline value.
+            if self.deadline_precision is not None or self.deadline_as_stated is not None:
+                raise ValueError(
+                    "deadline is null but deadline_precision/deadline_as_stated is set — "
+                    "neither carries meaning without a deadline value"
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _missing_fields_and_complete(self) -> "ExtractionFacts":
+        expected_missing: set[str] = set()
+        if self.theme is None:
+            expected_missing.add("theme")
+        if self.submission_type is None:
+            expected_missing.add("submission_type")
+        if self.has_deadline and self.deadline is None:
+            expected_missing.add("deadline")
+        for field_name in OPTIONAL_FACT_FIELDS:
+            if getattr(self, field_name) is None:
+                expected_missing.add(field_name)
+
+        if set(self.missing_fields) != expected_missing:
+            raise ValueError(
+                f"missing_fields {sorted(self.missing_fields)} must exactly equal the null "
+                f"nullable fields {sorted(expected_missing)} — a null deadline while "
+                "has_deadline=False is a fact, not a gap, and is excluded"
+            )
+
+        critical_missing = expected_missing & CRITICAL_FACT_FIELDS
+        expected_complete = not critical_missing
+        if self.complete != expected_complete:
+            raise ValueError(
+                f"complete={self.complete} but critical fields missing={sorted(critical_missing)} — "
+                "complete must be False iff a critical field (deadline when has_deadline, "
+                "theme, submission_type) is missing; optional-only gaps don't affect it"
+            )
+        return self
+
+
+class Extraction(ExtractionFacts):
+    """ExtractionFacts plus classify's own writes. Never instantiate
+    ExtractionFacts directly for a tracker entry — this is the shape
+    ConferenceEntry.extraction actually holds."""
+
     venue_tier: list[VenueTier] = Field(
         ...,
         min_length=1,
@@ -111,39 +229,11 @@ class Extraction(StrictModel):
         description="Almost always one bucket; two only when a candidate genuinely straddles buckets.",
     )
     venue_tier_reasoning: str
-    complete: bool
-    missing_fields: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _venue_tier_no_duplicates(self) -> "Extraction":
         if len(set(self.venue_tier)) != len(self.venue_tier):
             raise ValueError("venue_tier must not repeat the same bucket twice")
-        return self
-
-    @model_validator(mode="after")
-    def _complete_iff_no_missing_fields(self) -> "Extraction":
-        if self.complete and self.missing_fields:
-            raise ValueError("complete=True but missing_fields is non-empty")
-        if not self.complete and not self.missing_fields:
-            raise ValueError(
-                "complete=False requires at least one entry in missing_fields — "
-                "'incomplete' with nothing named as missing isn't a valid flag"
-            )
-        return self
-
-    @model_validator(mode="after")
-    def _deadline_rolling_vs_unfindable(self) -> "Extraction":
-        if not self.has_deadline and self.deadline is not None:
-            raise ValueError(
-                "has_deadline=False (rolling) but deadline is set — these are mutually exclusive"
-            )
-        if self.has_deadline and self.deadline is None:
-            if self.complete or "deadline" not in self.missing_fields:
-                raise ValueError(
-                    "has_deadline=True with no deadline value must be flagged incomplete "
-                    "(complete=False, 'deadline' in missing_fields) — rolling and "
-                    "unfindable-deadline are different cases, never conflate them"
-                )
         return self
 
 

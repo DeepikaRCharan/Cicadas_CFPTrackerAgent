@@ -1,9 +1,9 @@
-"""Tests for src/tracker_schema.py and src/profile_schema.py.
+"""Tests for src/tracker_schema.py, src/profile_schema.py, and
+src/decisions_schema.py.
 
-One valid + one invalid example per schema-fix rule from the review pass
-(see docs/project-brief.md for the shapes these encode). No pipeline logic
-is exercised here — these only check that the schema accepts/rejects the
-shapes it's supposed to.
+One valid + one invalid example per schema rule (see docs/project-brief.md
+for the shapes these encode). No pipeline logic is exercised here — these
+only check that the schema accepts/rejects the shapes it's supposed to.
 
 Run with: python -m unittest tests/test_schema.py -v
 """
@@ -16,13 +16,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from pydantic import ValidationError
 
+from decisions_schema import DecisionsFile, ResearcherDecision, find_untracked_ids
 from profile_schema import Profile
 from tracker_schema import (
+    SCHEMA_VERSION,
     AcademicPractitionerFit,
     ConferenceEntry,
     CorporateInstitutionalFit,
     DimensionScore,
     Extraction,
+    ExtractionFacts,
+    NotificationEntry,
+    NotificationReason,
     OtherAvenuesFit,
     ProfileClassification,
     ProfileMatch,
@@ -34,17 +39,29 @@ def make_extraction(**overrides):
     base = dict(
         has_deadline=True,
         deadline="2026-12-15",
+        deadline_precision="exact",
+        deadline_as_stated="15 December 2026",
+        submission_opens="November 2026",
+        submission_status="closed",
         submission_type="extended abstract",
         format_requirements="6 pages",
         fees="none",
         mode="virtual",
         theme="stem education",
+        location="Florence, Italy",
         venue_tier=["academic_practitioner"],
         venue_tier_reasoning="peer-reviewed track",
         complete=True,
         missing_fields=[],
     )
     base.update(overrides)
+    return base
+
+
+def make_extraction_facts(**overrides):
+    base = make_extraction(**overrides)
+    base.pop("venue_tier", None)
+    base.pop("venue_tier_reasoning", None)
     return base
 
 
@@ -173,6 +190,8 @@ class TestEmptyFitByTierOnlyWhenIncomplete(unittest.TestCase):
             extraction=make_extraction(
                 has_deadline=True,
                 deadline=None,
+                deadline_precision=None,
+                deadline_as_stated=None,
                 complete=False,
                 missing_fields=["deadline"],
             ),
@@ -244,6 +263,8 @@ class TestCompleteRequiresMissingFields(unittest.TestCase):
         Extraction(**make_extraction(
             has_deadline=True,
             deadline=None,
+            deadline_precision=None,
+            deadline_as_stated=None,
             complete=False,
             missing_fields=["deadline"],
         ))
@@ -271,6 +292,179 @@ class TestOtherAvenuesRequiresReasoning(unittest.TestCase):
                 scored_at="2026-10-01T09:00:00Z",
                 profile_hash="h1",
             )
+
+
+class TestExtractionFactsSplit(unittest.TestCase):
+    """Rule 9 (v4): ExtractionFacts holds the fact fields extraction fills;
+    venue_tier/venue_tier_reasoning belong only to Extraction (classify's
+    write), not ExtractionFacts."""
+
+    def test_valid_extraction_facts_without_venue_tier(self):
+        ExtractionFacts(**make_extraction_facts())
+
+    def test_invalid_extraction_facts_rejects_venue_tier(self):
+        with self.assertRaises(ValidationError):
+            ExtractionFacts(**make_extraction())  # still carries venue_tier/venue_tier_reasoning
+
+
+class TestDeadlinePrecisionRequiredWithDeadline(unittest.TestCase):
+    """Rule 10 (v4): a present deadline requires deadline_precision and
+    deadline_as_stated."""
+
+    def test_valid_deadline_with_precision_and_as_stated(self):
+        Extraction(**make_extraction(
+            deadline="2026-12-15",
+            deadline_precision="exact",
+            deadline_as_stated="15 December 2026",
+        ))
+
+    def test_invalid_deadline_without_precision(self):
+        with self.assertRaises(ValidationError):
+            Extraction(**make_extraction(
+                deadline="2026-12-15",
+                deadline_precision=None,
+                deadline_as_stated="15 December 2026",
+            ))
+
+
+class TestMonthPrecisionFirstOfMonth(unittest.TestCase):
+    """Rule 11 (v4): month-precision deadline must be stored as the 1st of
+    that month."""
+
+    def test_valid_month_precision_is_first_of_month(self):
+        Extraction(**make_extraction(
+            deadline="2027-02-01",
+            deadline_precision="month",
+            deadline_as_stated="February 2027",
+        ))
+
+    def test_invalid_month_precision_not_first_of_month(self):
+        with self.assertRaises(ValidationError):
+            Extraction(**make_extraction(
+                deadline="2027-02-15",
+                deadline_precision="month",
+                deadline_as_stated="February 2027",
+            ))
+
+
+class TestHasDeadlineFalseAllNull(unittest.TestCase):
+    """Rule 12 (v4): has_deadline=False requires deadline, deadline_precision,
+    and deadline_as_stated all null."""
+
+    def test_valid_rolling_venue_all_deadline_fields_null(self):
+        Extraction(**make_extraction(
+            has_deadline=False,
+            deadline=None,
+            deadline_precision=None,
+            deadline_as_stated=None,
+        ))
+
+    def test_invalid_rolling_venue_with_deadline_as_stated_set(self):
+        with self.assertRaises(ValidationError):
+            Extraction(**make_extraction(
+                has_deadline=False,
+                deadline=None,
+                deadline_precision=None,
+                deadline_as_stated="rolling submissions",
+            ))
+
+
+class TestMissingFieldsExactlyMatchNullFields(unittest.TestCase):
+    """Rule 13 (v4): every null nullable field (critical or optional) must
+    be listed in missing_fields, and nothing else."""
+
+    def test_valid_null_optional_field_listed(self):
+        Extraction(**make_extraction(
+            location=None,
+            complete=True,
+            missing_fields=["location"],
+        ))
+
+    def test_invalid_null_optional_field_not_listed(self):
+        with self.assertRaises(ValidationError):
+            Extraction(**make_extraction(
+                location=None,
+                complete=True,
+                missing_fields=[],
+            ))
+
+
+class TestCompleteOnlyFalseForCriticalGap(unittest.TestCase):
+    """Rule 14 (v4): complete is False iff a critical field (deadline when
+    has_deadline, theme, submission_type) is missing — an optional-only gap
+    still leaves complete=True."""
+
+    def test_valid_optional_only_gap_still_complete(self):
+        Extraction(**make_extraction(
+            location=None,
+            mode=None,
+            complete=True,
+            missing_fields=["location", "mode"],
+        ))
+
+    def test_invalid_critical_gap_marked_complete(self):
+        with self.assertRaises(ValidationError):
+            Extraction(**make_extraction(
+                theme=None,
+                complete=True,
+                missing_fields=["theme"],
+            ))
+
+
+class TestSubmissionsOpenedNotificationReason(unittest.TestCase):
+    """Rule 15 (v4): NotificationReason gains submissions_opened."""
+
+    def test_valid_submissions_opened_reason(self):
+        entry = NotificationEntry(date="2026-11-01", reason="submissions_opened", deadline=None)
+        self.assertEqual(entry.reason, NotificationReason.SUBMISSIONS_OPENED)
+
+    def test_invalid_unknown_reason(self):
+        with self.assertRaises(ValidationError):
+            NotificationEntry(date="2026-11-01", reason="bogus_reason", deadline=None)
+
+
+class TestSchemaVersionV4(unittest.TestCase):
+    """Rule 16 (v4): schema bumped to version 4; a stale version 3 file must
+    not silently validate."""
+
+    def test_valid_schema_version_is_4(self):
+        self.assertEqual(SCHEMA_VERSION, 4)
+        tf = TrackerFile()
+        self.assertEqual(tf.schema_version, 4)
+
+    def test_invalid_schema_version_3_rejected(self):
+        with self.assertRaises(ValidationError):
+            TrackerFile(schema_version=3)
+
+
+class TestDecisionsSchema(unittest.TestCase):
+    """Rule 17 (v4): decisions.json is id -> applying | applied | skipped
+    only; pending/unconfirmed (agent-only states) are an error here."""
+
+    def test_valid_decisions_file(self):
+        decisions = DecisionsFile.model_validate(
+            {"eci-2027": "applying", "example-summit-2027": "skipped"}
+        )
+        self.assertEqual(decisions.root["eci-2027"], ResearcherDecision.APPLYING)
+
+    def test_invalid_agent_only_state_rejected(self):
+        with self.assertRaises(ValidationError):
+            DecisionsFile.model_validate({"eci-2027": "pending"})
+
+
+class TestFindUntrackedIds(unittest.TestCase):
+    """Rule 18 (v4): the decisions.json check function reports every key
+    that isn't a tracked conference id."""
+
+    def test_valid_all_ids_tracked(self):
+        decisions = DecisionsFile.model_validate({"eci-2027": "applying"}).root
+        self.assertEqual(find_untracked_ids(decisions, {"eci-2027", "other-2027"}), [])
+
+    def test_invalid_id_not_tracked_is_reported(self):
+        decisions = DecisionsFile.model_validate(
+            {"eci-2027": "applying", "typo-conf-2027": "skipped"}
+        ).root
+        self.assertEqual(find_untracked_ids(decisions, {"eci-2027"}), ["typo-conf-2027"])
 
 
 if __name__ == "__main__":
