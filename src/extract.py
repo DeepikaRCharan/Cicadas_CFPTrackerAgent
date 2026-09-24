@@ -134,8 +134,13 @@ month (e.g. "2027-02-01"), deadline_precision to "month", and deadline_as_stated
 process. It is a different case from "a deadline should exist but isn't stated on this page" -- that case \
 is has_deadline=true, deadline=null, deadline_precision=null, deadline_as_stated=null, with "deadline" in \
 missing_fields. Never conflate the two.
-- submission_status reflects what the page says about submissions right now: "not_yet_open", "open", \
-"closed", or "unknown" if the page simply doesn't say. This field is never null.
+- call_status reflects what the venue's call is doing right now. You are given today's date along with the \
+page text -- use it to resolve time-relative wording:
+  - A stated opening date/month that is still in the future relative to today -> "not_yet_open".
+  - A stated opening date/month that has already passed relative to today, or the page saying submissions \
+are currently open -> "open".
+  - The page saying submissions are closed -> "closed".
+  - None of the above determinable from the page -> "unknown". This field is never null.
 - submission_opens is the page's own wording for when submissions open, if stated (this can differ from the \
 deadline wording).
 - complete is false if and only if at least one CRITICAL field -- deadline (only when has_deadline is \
@@ -182,10 +187,13 @@ EXTRACTION_TOOL = {
                 "type": ["string", "null"],
                 "description": "The page's own wording for when submissions open (e.g. 'November 2026'). Null if not stated.",
             },
-            "submission_status": {
+            "call_status": {
                 "type": "string",
                 "enum": ["not_yet_open", "open", "closed", "unknown"],
-                "description": "What the page says about submissions right now. 'unknown' if the page doesn't say. Never null.",
+                "description": (
+                    "What the venue's call is doing right now, resolved against today's date (see the "
+                    "call_status rule above). 'unknown' if it can't be determined from the page. Never null."
+                ),
             },
             "submission_type": {
                 "type": ["string", "null"],
@@ -236,7 +244,7 @@ EXTRACTION_TOOL = {
         },
         "required": [
             "has_deadline", "deadline", "deadline_precision", "deadline_as_stated",
-            "submission_opens", "submission_status", "submission_type", "theme", "location",
+            "submission_opens", "call_status", "submission_type", "theme", "location",
             "format_requirements", "fees", "mode", "complete", "missing_fields",
         ],
     },
@@ -257,12 +265,21 @@ def _write_log(prefix: str, suffix: str, content: str) -> Path:
     return path
 
 
-def extract_facts(url: str) -> ExtractionFacts:
+def extract_facts(url: str, today: datetime.date | None = None) -> ExtractionFacts:
     """Fetch `url`, convert it to plain text, and extract ExtractionFacts
     from it via the extraction model. Raises RuntimeError (fetch/model
     failure) or pydantic.ValidationError (malformed or invalid output) --
     both are visible, run-stopping failures; nothing here is caught and
-    papered over with a default."""
+    papered over with a default.
+
+    `today` defaults to the real current date; it's a parameter (rather than
+    the model reading its own clock) so call_status's time-relative rule --
+    a future stated opening date is not_yet_open, a passed one is open -- is
+    resolved against a date extraction actually hands the model, not one it
+    has to assume."""
+    if today is None:
+        today = datetime.datetime.now(datetime.timezone.utc).date()
+
     html = fetch_page(url)
     page_text = html_to_text(html)
     page_text_log = _write_log("page_text", "txt", page_text)
@@ -274,7 +291,10 @@ def extract_facts(url: str) -> ExtractionFacts:
         messages=[
             {
                 "role": "user",
-                "content": f"Page URL: {url}\n\nPage text:\n\n{page_text}",
+                "content": (
+                    f"Today's date: {today.isoformat()}\n\n"
+                    f"Page URL: {url}\n\nPage text:\n\n{page_text}"
+                ),
             }
         ],
         tools=[EXTRACTION_TOOL],

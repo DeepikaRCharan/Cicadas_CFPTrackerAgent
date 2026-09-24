@@ -51,7 +51,7 @@ class DeadlinePrecision(str, Enum):
     MONTH = "month"
 
 
-class SubmissionStatus(str, Enum):
+class CallStatus(str, Enum):
     NOT_YET_OPEN = "not_yet_open"
     OPEN = "open"
     CLOSED = "closed"
@@ -142,9 +142,9 @@ class ExtractionFacts(StrictModel):
         None,
         description="The page's own wording for when submissions open, e.g. 'November 2026'. Optional field.",
     )
-    submission_status: SubmissionStatus = Field(
+    call_status: CallStatus = Field(
         ...,
-        description="What the page says right now. 'unknown' covers not-stated — this field is never null.",
+        description="What the page's call is doing right now. 'unknown' covers not-stated — this field is never null.",
     )
     submission_type: str | None = None
     format_requirements: str | None = None

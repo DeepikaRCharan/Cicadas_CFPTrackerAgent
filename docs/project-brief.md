@@ -103,7 +103,7 @@ One entry per conference/venue. Facts about the venue are stored once, in `extra
         "deadline_precision": "exact | month | null",
         "deadline_as_stated": "15 December 2026 | null",
         "submission_opens": "November 2026 | null",
-        "submission_status": "not_yet_open | open | closed | unknown",
+        "call_status": "not_yet_open | open | closed | unknown",
         "submission_type": "...", "theme": "...",
         "location": "Florence, Italy | null",
         "format_requirements": "... | null",
@@ -177,7 +177,7 @@ A small file at the repo root that **only the researcher edits** — the agent r
 - **Critical vs. optional fields.** Critical: the deadline (when `has_deadline: true`), `theme`, `submission_type`. Optional: `location`, `mode`, `fees`, `format_requirements`, `submission_opens`. Any field not stated on the page is null and listed in `missing_fields` — never guessed. `complete: false` only when a **critical** field is missing; a venue missing only optional fields is still scored. Incomplete venues are flagged rather than scored.
 - **Deadline precision.** `deadline_as_stated` is always the page's own wording. An exact date → `deadline_precision: exact`. A month only ("February 2027") → `deadline_precision: month`, with `deadline` set to the first day of that month. A later run that finds the exact date upgrades it and counts as `deadline_changed`.
 - **Who fills what.** Extraction (light model) fills the fact fields only. `venue_tier` and `venue_tier_reasoning` are written by classify (stronger model), never by extraction.
-- **Submission status.** `submission_status` records what the page says now: `not_yet_open`, `open`, `closed`, or `unknown`. `submission_opens` keeps the page's wording for when it opens.
+- **Call status.** `call_status` records what the venue's call is doing now: `not_yet_open`, `open`, `closed`, or `unknown`. `submission_opens` keeps the page's wording for when it opens.
 - **`has_deadline: false` is a fact, not a gap.** A genuinely rolling/pitch-based outlet gets `has_deadline: false` — that's real information. A deadline that should exist but wasn't findable on the page is a *different* case: `complete: false`, in `missing_fields`. Don't conflate the two — this distinction is what the extraction eval specifically stress-tests.
 
 ## Venue buckets and rubric
@@ -213,7 +213,7 @@ Equal weighting within whichever dimension set was selected (simple average). Do
 1. **Trigger** — the 7th of every month, or `workflow_dispatch` on demand. Same code path either way. The first action of every run is syncing `decisions.json` into the tracker (see Researcher decisions).
 2. **Discover** — web search for candidate CFPs/venues matching the profile's topics.
 3. **Extract** — per candidate: deadline (or its genuine absence) and its precision, submission status and opening, submission type, theme, location, format, fees, mode.
-   - **Re-check tracked venues** — every open (`pending` or `applying`) tracked venue is re-fetched and re-extracted (light model only; no re-classify or re-score unless the profile changed). A change to `submission_status` → `open` logs `submissions_opened`; a changed or newly-exact deadline logs `deadline_changed`.
+   - **Re-check tracked venues** — every open (`pending` or `applying`) tracked venue is re-fetched and re-extracted (light model only; no re-classify or re-score unless the profile changed). A change to `call_status` → `open` logs `submissions_opened`; a changed or newly-exact deadline logs `deadline_changed`.
 4. **Classify** — read the paper's own content (once per profile, cached) and the candidate's content separately; infer bucket(s) for each, with reasoning logged for both calls.
 5. **Judge fit** — score against the bucket(s) assigned, using that bucket's dimensions. The model scores each dimension with reasoning; it is never asked for `overall`, which code computes as the simple average.
 6. **Update tracker** — write extraction + fit + reasoning, commit back.
@@ -240,7 +240,7 @@ This lets the researcher catch a misread immediately rather than trusting it sil
 | Conference | `name` |
 | Location | `extraction.location` |
 | Deadline | `extraction.deadline_as_stated`, or "Rolling" when `has_deadline: false` |
-| Submissions open | `extraction.submission_status` + `extraction.submission_opens` |
+| Submissions open | `extraction.call_status` + `extraction.submission_opens` |
 | Bucket(s) | `extraction.venue_tier` |
 | Fitness | `fit_by_tier.<bucket>.overall` (one row per bucket if multi-bucket) |
 | Per-dimension scores | `fit_by_tier.<bucket>.<dimension>` — score + reasoning |
@@ -276,7 +276,7 @@ This lets the researcher catch a misread immediately rather than trusting it sil
 Separate daily GitHub Actions workflow. Reads `decisions.json` then `tracker.json` — **no LLM, no web search**, plain date arithmetic. Reuses the email code. Runs at a different hour than the monthly workflow so they never commit at once.
 
 - **`new_fit`** (monthly run) — first time a match crosses 50%.
-- **`submissions_opened`** (monthly run) — a re-check finds `submission_status` changed to `open` on an already-sent venue.
+- **`submissions_opened`** (monthly run) — a re-check finds `call_status` changed to `open` on an already-sent venue.
 - **`deadline_changed`** (monthly run) — an open, `has_deadline: true` match whose deadline or its precision changed since last recorded (including month → exact date). Doesn't apply to rolling entries.
 - **`week_before`** (daily watcher) — only `has_deadline: true` entries, `pending` or `applying`, sent once per deadline: seven days before an exact date; for a month-only deadline, seven days before that month starts, labelled "exact date not published."
 - **Closure** — only `has_deadline: true` entries. Two days after the deadline (for a month-only deadline, two days after that month ends), any still-open match becomes `unconfirmed`, including ones that never crossed 50% (they were never emailed; their stored fit explains why). Closed entries are never reopened or re-scored, even if rediscovered later.
@@ -360,7 +360,7 @@ If time runs out, stop after whichever numbered item is last solid and demo from
 
 **Not yet done:**
 
-- Schema update for the decisions made after step 1: extraction's new fields (`deadline_precision`, `deadline_as_stated`, `submission_opens`, `submission_status`, `location`), critical/optional fields, the `submissions_opened` notification reason, and a schema for `decisions.json`
+- Schema update for the decisions made after step 1: extraction's new fields (`deadline_precision`, `deadline_as_stated`, `submission_opens`, `call_status`, `location`), critical/optional fields, the `submissions_opened` notification reason, and a schema for `decisions.json`
 - Extraction, classify, judge-fit — no logic for any of the three
 - `tracker.json`, `decisions.json`, and tracker read/write logic
 - `profiles/` demo profile files

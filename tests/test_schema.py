@@ -42,7 +42,7 @@ def make_extraction(**overrides):
         deadline_precision="exact",
         deadline_as_stated="15 December 2026",
         submission_opens="November 2026",
-        submission_status="closed",
+        call_status="closed",
         submission_type="extended abstract",
         format_requirements="6 pages",
         fees="none",
