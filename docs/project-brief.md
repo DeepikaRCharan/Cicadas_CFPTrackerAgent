@@ -240,7 +240,7 @@ This lets the researcher catch a misread immediately rather than trusting it sil
 | Conference | `name` |
 | Location | `extraction.location` |
 | Deadline | `extraction.deadline_as_stated`, or "Rolling" when `has_deadline: false` |
-| Submissions open | `extraction.call_status` + `extraction.submission_opens` |
+| Call | `extraction.call_status` + `extraction.submission_opens`, rendered as a plain phrase: "Opens {submission_opens}" (`not_yet_open`) · "Open now" (`open`) · "Closed" (`closed`) · "Not stated on venue page" (`unknown`, or `not_yet_open` with no `submission_opens` stated) |
 | Bucket(s) | `extraction.venue_tier` |
 | Fitness | `fit_by_tier.<bucket>.overall` (one row per bucket if multi-bucket) |
 | Per-dimension scores | `fit_by_tier.<bucket>.<dimension>` — score + reasoning |
