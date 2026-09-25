@@ -127,6 +127,12 @@ a surrounding label like "Deadline for Abstract Submission".
 is in-person -- mode is null unless the page explicitly says in-person, virtual, or hybrid. The same goes \
 for every other field: if the page states X and you're tempted to conclude Y because X usually implies Y, \
 leave the field null instead.
+- access is the one exception to "never infer": a page publishing an open call inviting submissions -- a \
+call for abstracts, call for papers, call for speakers, or similarly public submission instructions anyone \
+can follow -- counts as stating access="open", even if the page never uses the word "open" itself. This is \
+reading what the page's own call plainly does, not guessing. Use "invite_only" or "members_only" only when \
+the page explicitly restricts who may submit that way. Use null only when the page gives no indication \
+either way -- neither a public call nor a stated restriction.
 - If the page states only a month for the deadline (e.g. "February 2027"), set deadline to the 1st of that \
 month (e.g. "2027-02-01"), deadline_precision to "month", and deadline_as_stated to the page's own wording \
 ("February 2027"). If the page states an exact day, set deadline_precision to "exact".
@@ -211,8 +217,12 @@ EXTRACTION_TOOL = {
                 "type": ["string", "null"],
                 "enum": ["open", "invite_only", "members_only", None],
                 "description": (
-                    "Whether the call is open to anyone, invite-only, or members-only, only if the "
-                    "page explicitly says so. Null if access isn't explicitly stated."
+                    "Whether the call is open to anyone, invite-only, or members-only. A page "
+                    "publishing an open call inviting submissions (call for abstracts/papers/"
+                    "speakers, or similarly public submission instructions) counts as 'open', even "
+                    "without the word 'open' itself. 'invite_only'/'members_only' only when the page "
+                    "explicitly restricts who may submit. Null only when the page gives no "
+                    "indication either way."
                 ),
             },
             "format_requirements": {
