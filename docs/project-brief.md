@@ -383,13 +383,13 @@ If time runs out, stop after whichever numbered item is last solid and demo from
 - `requirements.txt` — `anthropic`, `resend`, `python-dotenv`, `pydantic`, `requests`
 - `src/llm.py` — the single `call_llm()` wrapper every model call routes through; logs input/output token counts per call
 - `.env.example` with `ANTHROPIC_API_KEY`, `RESEND_API_KEY`, `NOTIFY_TO`; `decisions.json` as `{}`
-- Build step 1: schemas (`src/tracker_schema.py` v4, `src/profile_schema.py`, `src/decisions_schema.py`), `extra="forbid"`, with `tests/test_schema.py` (stdlib `unittest`) passing
+- Build step 1: schemas (`src/tracker_schema.py`, `src/profile_schema.py`, `src/decisions_schema.py`), `extra="forbid"`, with `tests/test_schema.py` (stdlib `unittest`) passing
 - Build step 2: `src/extract.py` — fetch, HTML-to-text, Haiku extraction into `ExtractionFacts`, today's date passed in, logs to gitignored `logs/`; verified against the ECI 2027 page
 - Build step 3: `src/classify.py` — paper and venue classify on Sonnet 5; both demo profiles in `profiles/`; `preferred_format` excluded from classify; list-coercion safety net logs a warning when it fires
+- Schema v5: one fit shape (`theme_fit`, `genre_fit`, `format_fit`) replacing the per-bucket models, Other Avenues keeping `theme_fit` + `no_other_fit_reasoning`; `access` (open / invite_only / members_only, nullable) added to `ExtractionFacts` and to the extraction prompt/tool schema; `tier_alert` added to `NotificationReason` and `TIER_ALERT_THEME_MIN = 75` added to `config.py`; `preferred_format` confirmed absent from the profile schema and both profile files; `tests/test_schema.py` at 46 tests, all passing; re-verified against the ECI 2027 page live (`access` correctly comes back null with `missing_fields: ["access", ...]`)
 
 **Not yet done:**
 
-- Schema v5: replace the per-bucket fit models with one shape (`theme_fit`, `genre_fit`, `format_fit`), Other Avenues keeping `theme_fit` + `no_other_fit_reasoning`; add `access` (open / invite_only / members_only, nullable) to ExtractionFacts; add `tier_alert` to NotificationReason and `TIER_ALERT_THEME_MIN = 75` to config.py; remove `preferred_format` from the profile schema and both profile files
 - Judge-fit (step 4) and everything after it: tracker read/write, email renderer and sending, discovery and re-check, GitHub Actions workflows, deadline watcher, README, eval sets
 
 **Repo hygiene to fix, not just build:**

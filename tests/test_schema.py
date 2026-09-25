@@ -16,11 +16,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from pydantic import ValidationError
 
+from config import TIER_ALERT_THEME_MIN
 from decisions_schema import DecisionsFile, ResearcherDecision, find_untracked_ids
 from profile_schema import Profile
 from tracker_schema import (
     SCHEMA_VERSION,
     TIER_FIT_MODEL,
+    AccessType,
     ConferenceEntry,
     DimensionScore,
     Extraction,
@@ -50,6 +52,7 @@ def make_extraction(**overrides):
         mode="virtual",
         theme="stem education",
         location="Florence, Italy",
+        access="open",
         venue_tier=["academic_practitioner"],
         venue_tier_reasoning="peer-reviewed track",
         complete=True,
@@ -68,9 +71,9 @@ def make_extraction_facts(**overrides):
 
 def make_standard_fit(**overrides):
     base = dict(
-        topic_fit={"score": 80, "reasoning": "on-theme"},
-        kind_fit={"score": 60, "reasoning": "research-rigor framing"},
-        submission_fit={"score": 70, "reasoning": "ample runway"},
+        theme_fit={"score": 80, "reasoning": "on-theme"},
+        genre_fit={"score": 60, "reasoning": "research-rigor framing"},
+        format_fit={"score": 70, "reasoning": "ample runway"},
         scored_at="2026-10-01T09:00:00Z",
         profile_hash="h1",
     )
@@ -267,7 +270,7 @@ class TestOtherAvenuesRequiresReasoning(unittest.TestCase):
 
     def test_valid_with_reasoning(self):
         OtherAvenuesFit(
-            topic_fit={"score": 40, "reasoning": "loose thematic overlap only"},
+            theme_fit={"score": 40, "reasoning": "loose thematic overlap only"},
             no_other_fit_reasoning="doesn't fit any of the other three buckets",
             scored_at="2026-10-01T09:00:00Z",
             profile_hash="h1",
@@ -276,7 +279,7 @@ class TestOtherAvenuesRequiresReasoning(unittest.TestCase):
     def test_invalid_without_reasoning(self):
         with self.assertRaises(ValidationError):
             OtherAvenuesFit(
-                topic_fit={"score": 40, "reasoning": "loose thematic overlap only"},
+                theme_fit={"score": 40, "reasoning": "loose thematic overlap only"},
                 scored_at="2026-10-01T09:00:00Z",
                 profile_hash="h1",
             )
@@ -284,7 +287,7 @@ class TestOtherAvenuesRequiresReasoning(unittest.TestCase):
 
 class TestOneShapeAcrossBuckets(unittest.TestCase):
     """Rule 8b (v5): all three non-catch-all buckets share one dimension
-    shape (topic_fit, kind_fit, submission_fit) instead of per-bucket
+    shape (theme_fit, genre_fit, format_fit) instead of per-bucket
     dimension sets."""
 
     def test_valid_all_three_standard_buckets_map_to_standard_fit(self):
@@ -472,6 +475,61 @@ class TestFindUntrackedIds(unittest.TestCase):
             {"eci-2027": "applying", "typo-conf-2027": "skipped"}
         ).root
         self.assertEqual(find_untracked_ids(decisions, {"eci-2027"}), ["typo-conf-2027"])
+
+
+class TestAccessField(unittest.TestCase):
+    """Rule 19 (v5): access (open | invite_only | members_only | null) on
+    ExtractionFacts; null must be listed in missing_fields like any other
+    optional field."""
+
+    def test_valid_each_access_value(self):
+        for value in ("open", "invite_only", "members_only"):
+            facts = ExtractionFacts(**make_extraction_facts(access=value))
+            self.assertEqual(facts.access, AccessType(value))
+
+    def test_valid_null_access_listed_in_missing_fields(self):
+        facts = ExtractionFacts(**make_extraction_facts(access=None, missing_fields=["access"]))
+        self.assertIsNone(facts.access)
+
+    def test_invalid_null_access_not_listed(self):
+        with self.assertRaises(ValidationError):
+            ExtractionFacts(**make_extraction_facts(access=None, missing_fields=[]))
+
+    def test_invalid_bogus_access_value(self):
+        with self.assertRaises(ValidationError):
+            ExtractionFacts(**make_extraction_facts(access="secret_handshake"))
+
+
+class TestTierAlertNotificationReason(unittest.TestCase):
+    """Rule 20 (v5): NotificationReason gains tier_alert; TIER_ALERT_THEME_MIN
+    is the named constant (75) computed purely from stored scores."""
+
+    def test_valid_tier_alert_reason(self):
+        entry = NotificationEntry(date="2026-11-01", reason="tier_alert", deadline=None)
+        self.assertEqual(entry.reason, NotificationReason.TIER_ALERT)
+
+    def test_valid_tier_alert_threshold_constant(self):
+        self.assertEqual(TIER_ALERT_THEME_MIN, 75)
+
+
+class TestPreferredFormatRemoved(unittest.TestCase):
+    """Rule 21 (v5): preferred_format no longer exists anywhere on Profile —
+    the paper's submittable form is judge-fit's job to read from the paper
+    itself, not the researcher's to declare (brief, "Paper profiles")."""
+
+    def test_invalid_preferred_format_rejected(self):
+        with self.assertRaises(ValidationError):
+            Profile(
+                id="x",
+                title="t",
+                abstract="a",
+                keywords=["k"],
+                preferred_format="full paper",
+            )
+
+    def test_valid_profile_without_preferred_format(self):
+        Profile(id="x", title="t", abstract="a", keywords=["k"])
+        self.assertNotIn("preferred_format", Profile.model_fields)
 
 
 if __name__ == "__main__":

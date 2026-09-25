@@ -46,6 +46,12 @@ class SubmissionMode(str, Enum):
     HYBRID = "hybrid"
 
 
+class AccessType(str, Enum):
+    OPEN = "open"
+    INVITE_ONLY = "invite_only"
+    MEMBERS_ONLY = "members_only"
+
+
 class DeadlinePrecision(str, Enum):
     EXACT = "exact"
     MONTH = "month"
@@ -95,6 +101,7 @@ REMINDER_ELIGIBLE_DECISIONS = frozenset({DecisionState.PENDING, DecisionState.AP
 
 class NotificationReason(str, Enum):
     NEW_FIT = "new_fit"
+    TIER_ALERT = "tier_alert"
     DEADLINE_CHANGED = "deadline_changed"
     SUBMISSIONS_OPENED = "submissions_opened"
     WEEK_BEFORE = "week_before"
@@ -106,7 +113,9 @@ class NotificationReason(str, Enum):
 CRITICAL_FACT_FIELDS = frozenset({"deadline", "theme", "submission_type"})
 # Optional fields: nullable, never affect `complete`, but still must be
 # named in missing_fields when null — nothing null is ever left unlisted.
-OPTIONAL_FACT_FIELDS = frozenset({"location", "mode", "fees", "format_requirements", "submission_opens"})
+OPTIONAL_FACT_FIELDS = frozenset(
+    {"location", "access", "mode", "fees", "format_requirements", "submission_opens"}
+)
 
 
 class ExtractionFacts(StrictModel):
@@ -152,6 +161,14 @@ class ExtractionFacts(StrictModel):
     mode: SubmissionMode | None = None
     theme: str | None = None
     location: str | None = None
+    access: AccessType | None = Field(
+        None,
+        description=(
+            "open / invite_only / members_only, only if the page explicitly says so. "
+            "members_only is shown to the researcher, not skipped — they may be a member. "
+            "Optional field."
+        ),
+    )
     complete: bool
     missing_fields: list[str] = Field(default_factory=list)
 
@@ -252,8 +269,8 @@ class TierFitBase(StrictModel):
 
     v5 (brief, "Venue buckets and rubric"): one dimension shape for every
     bucket instead of per-bucket dimension sets — a wrong venue_tier now
-    only changes the lens judge-fit applies to kind_fit, instead of swapping
-    the whole rubric."""
+    only changes the lens judge-fit applies to genre_fit, instead of
+    swapping the whole rubric."""
 
     overall: int = Field(
         0,
@@ -288,20 +305,20 @@ class TierFitBase(StrictModel):
 class StandardFit(TierFitBase):
     """The shared three-dimension rubric for Academic & Practitioner,
     Industry & Technical Media, and Corporate & Institutional (brief:
-    "same names in every bucket" — kind_fit's lens on what "kind" means
+    "same names in every bucket" — genre_fit's lens on what "genre" means
     shifts per bucket, but the field itself doesn't)."""
 
-    topic_fit: DimensionScore
-    kind_fit: DimensionScore
-    submission_fit: DimensionScore
+    theme_fit: DimensionScore
+    genre_fit: DimensionScore
+    format_fit: DimensionScore
 
 
 class OtherAvenuesFit(TierFitBase):
-    """Other Avenues keeps topic_fit only, plus the required
-    no_other_fit_reasoning — kind_fit and submission_fit don't apply to a
+    """Other Avenues keeps theme_fit only, plus the required
+    no_other_fit_reasoning — genre_fit and format_fit don't apply to a
     catch-all bucket with no venue-type lens to judge them against."""
 
-    topic_fit: DimensionScore
+    theme_fit: DimensionScore
     no_other_fit_reasoning: str = Field(
         ...,
         min_length=1,
@@ -309,7 +326,7 @@ class OtherAvenuesFit(TierFitBase):
     )
     low_confidence: bool = Field(
         True,
-        description="topic_fit-only scores are a signal to glance at manually, never fully trusted.",
+        description="theme_fit-only scores are a signal to glance at manually, never fully trusted.",
     )
 
 

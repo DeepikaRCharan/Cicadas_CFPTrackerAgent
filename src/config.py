@@ -12,3 +12,9 @@ MODEL_JUDGE = "claude-sonnet-5"
 
 # Where the tracker data file lives, relative to the project root.
 TRACKER_PATH = "tracker.json"
+
+# Tier Alert threshold (brief, "Monthly digest > Tier Alert"): a match with
+# theme_fit >= this but overall < 50, call not closed, gets flagged as a
+# possible venue-tier misread rather than staying silent. Computed purely
+# from stored scores — no extra LLM call.
+TIER_ALERT_THEME_MIN = 75

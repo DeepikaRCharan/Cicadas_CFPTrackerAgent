@@ -119,7 +119,7 @@ Rules, followed exactly:
 plausible-sounding default. If it isn't on the page, the field is null.
 - Every field you set to null -- except a null deadline when has_deadline is false -- must have its field \
 name listed in missing_fields. The allowed names are exactly: deadline, theme, submission_type, location, \
-mode, fees, format_requirements, submission_opens.
+access, mode, fees, format_requirements, submission_opens.
 - deadline_as_stated must be the deadline date phrase exactly as worded on the page, verbatim -- never \
 reformatted, paraphrased, or normalized. Include only the date phrase itself (e.g. "31 March 2027"), not \
 a surrounding label like "Deadline for Abstract Submission".
@@ -207,6 +207,14 @@ EXTRACTION_TOOL = {
                 "type": ["string", "null"],
                 "description": "City/venue location if stated (e.g. 'Florence, Italy'). Null if not stated.",
             },
+            "access": {
+                "type": ["string", "null"],
+                "enum": ["open", "invite_only", "members_only", None],
+                "description": (
+                    "Whether the call is open to anyone, invite-only, or members-only, only if the "
+                    "page explicitly says so. Null if access isn't explicitly stated."
+                ),
+            },
             "format_requirements": {
                 "type": ["string", "null"],
                 "description": "Submission format constraints (page limits, word counts, template) if stated. Null if not stated.",
@@ -236,7 +244,7 @@ EXTRACTION_TOOL = {
                 "items": {"type": "string"},
                 "description": (
                     "Exactly the nullable fields above that you set to null (from: deadline, "
-                    "theme, submission_type, location, mode, fees, format_requirements, "
+                    "theme, submission_type, location, access, mode, fees, format_requirements, "
                     "submission_opens). Omit 'deadline' when has_deadline is false -- that's a "
                     "fact, not a gap."
                 ),
@@ -245,7 +253,7 @@ EXTRACTION_TOOL = {
         "required": [
             "has_deadline", "deadline", "deadline_precision", "deadline_as_stated",
             "submission_opens", "call_status", "submission_type", "theme", "location",
-            "format_requirements", "fees", "mode", "complete", "missing_fields",
+            "access", "format_requirements", "fees", "mode", "complete", "missing_fields",
         ],
     },
 }
