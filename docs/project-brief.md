@@ -12,7 +12,7 @@ Given a researcher's paper, Cicadas periodically finds conference and publicatio
 
 The instructor's explicit requirement: the agent must exercise real agency, not execute a script in a loop.
 
-The agency lives in two steps: **classify** (what bucket does this paper, and this venue, actually belong to) and **judge fit** (how well do they match, on dimensions that depend on that bucket). Neither is declared or configured anywhere — the agent reads unstructured content and forms the judgment itself, every run, with reasoning logged for both calls.
+The agency lives in two steps: **classify** (what bucket does this paper, and this venue, actually belong to) and **judge fit** (how well do they match, with the bucket steering how the kind of writing is judged). Neither is declared or configured anywhere — the agent reads unstructured content and forms the judgment itself, every run, with reasoning logged for both calls.
 
 A rubric the researcher can see, or even wrote, does not make this less agentic — a rubric supplies criteria to reason with, not an answer to look up. What *would* break it: any dimension collapsing into a keyword match or a hardcoded threshold. Keep dimensions qualitative enough that the model has to read and weigh them. Do not "simplify" scoring into a numeric formula, even under time pressure — that's the one shortcut not available.
 
@@ -61,12 +61,12 @@ Every piece of scope falls into exactly one of these. If unsure where something 
 
 Up to **two** live profiles at once, each a file under `profiles/`, each a distinct paper (or a distinct angle on one paper). The loader must refuse to run with more than two — this is a deliberate cost cap, not a bug to fix later.
 
-Each profile file: title, abstract, keywords/topics, preferred format, a short `id`.
+Each profile file: title, abstract, keywords/topics, a short `id`. **No preferred format** — what the paper is, and what form it could be submitted in, is for the agent to read from the paper itself, not for the researcher to declare.
 
 **Demo profiles:**
 
 1. The 2025 Nobel Prize–winning immune-tolerance paper (Sakaguchi et al., or another paper from that line of work) — real, published, not the researcher's own. Used as an unambiguous "academic" case.
-2. The elephant corridors piece — Gemini-generated, policy/design-summit angle. Used as a genuinely ambiguous, non-academic case.
+2. The elephant corridors piece — Gemini-generated, policy/design-summit angle. Intended as the ambiguous case; classify read it as Academic & Practitioner (its abstract is dense academic synthesis), and that honest result stands. Coverage of the non-academic buckets comes from the classify eval set, not from forcing this profile.
 
 See–Map–Speak is the researcher's own real work but is **not** one of the two live profiles — referenced in the README only (see Authorship disclosure below).
 
@@ -85,7 +85,7 @@ One entry per conference/venue. Facts about the venue are stored once, in `extra
   "last_run": "2026-10-01T09:00:00Z",
   "profiles": {
     "elephant-corridors": {
-      "paper_bucket": ["corporate_institutional"],
+      "paper_bucket": ["academic_practitioner"],
       "paper_bucket_cues": ["...", "...", "..."],
       "paper_bucket_reasoning": "...",
       "profile_hash": "...", "classified_at": "...",
@@ -115,10 +115,10 @@ One entry per conference/venue. Facts about the venue are stored once, in `extra
       "matches": {
         "elephant-corridors": {
           "fit_by_tier": {
-            "corporate_institutional": {
-              "theme_alignment": { "score": 80, "reasoning": "..." },
-              "audience_fit": { "score": 65, "reasoning": "..." },
-              "logistical_feasibility": { "score": 60, "reasoning": "..." },
+            "academic_practitioner": {
+              "topic_fit": { "score": 80, "reasoning": "..." },
+              "kind_fit": { "score": 65, "reasoning": "..." },
+              "submission_fit": { "score": 60, "reasoning": "..." },
               "overall": 68, "scored_at": "...", "profile_hash": "..."
             }
           },
@@ -177,7 +177,7 @@ A small file at the repo root that **only the researcher edits** — the agent r
 - **Critical vs. optional fields.** Critical: the deadline (when `has_deadline: true`), `theme`, `submission_type`. Optional: `location`, `mode`, `fees`, `format_requirements`, `submission_opens`. Any field not stated on the page is null and listed in `missing_fields` — never guessed. `complete: false` only when a **critical** field is missing; a venue missing only optional fields is still scored. Incomplete venues are flagged rather than scored.
 - **Deadline precision.** `deadline_as_stated` is always the page's own wording. An exact date → `deadline_precision: exact`. A month only ("February 2027") → `deadline_precision: month`, with `deadline` set to the first day of that month. A later run that finds the exact date upgrades it and counts as `deadline_changed`.
 - **Who fills what.** Extraction (light model) fills the fact fields only. `venue_tier` and `venue_tier_reasoning` are written by classify (stronger model), never by extraction.
-- **Call status.** `call_status` records what the venue's call is doing now: `not_yet_open`, `open`, `closed`, or `unknown`. `submission_opens` keeps the page's wording for when it opens.
+- **Call status.** `call_status` describes the venue's call, not the researcher's submission — it records what the page says now, judged against today's date (passed to extraction): `not_yet_open`, `open`, `closed`, or `unknown`. `submission_opens` keeps the page's wording for when it opens.
 - **`has_deadline: false` is a fact, not a gap.** A genuinely rolling/pitch-based outlet gets `has_deadline: false` — that's real information. A deadline that should exist but wasn't findable on the page is a *different* case: `complete: false`, in `missing_fields`. Don't conflate the two — this distinction is what the extraction eval specifically stress-tests.
 
 ## Venue buckets and rubric
@@ -191,16 +191,24 @@ Four buckets, deliberately few:
 
 Classify assigns the bucket(s); none are declared on the profile. Almost always exactly one. Two only when a candidate genuinely straddles buckets — capped at two; a third suggests the buckets need rethinking, not that the candidate is unusual.
 
-**Shared dimension, every bucket:** `theme_alignment` — does the call overlap with the paper's actual subject matter.
+**Three dimensions, same names in every bucket.** Whatever the writing — empirical research, business process, economics, social observation — fit comes down to three questions, and a venue can fail any one while passing the other two:
 
-**Additional dimensions by bucket:**
+- **`topic_fit`** — *Is this paper's actual subject something this venue asks for?* The paper's core subject, not words it merely mentions, against the venue's stated topics, tracks and categories. Central overlap (fits a named track) scores high; a loose connection scores low.
+- **`kind_fit`** — *Does this venue publish this kind of writing, for this kind of reader?* The bucket tells the model what to look at:
+  - Academic & Practitioner — research rigor and method: would their reviewers accept this level of evidence?
+  - Industry & Technical Media — voice and register: does the outlet publish writing that sounds like this?
+  - Corporate & Institutional — audience: would policymakers or executives find it usable?
+- **`submission_fit`** — *Can this piece go in as it is?* Two things only: does the venue accept a form this paper can be submitted in (abstract, full paper, article, pitch, length limits) — judged by the model from the paper itself, noting any adaptation needed ("would need condensing to an abstract") — and is it open to submissions, or invite-only / members-only?
 
-- **Academic & Practitioner:** `nature_fit` (research-rigor vs. practitioner framing, matched to how the paper itself is framed) · `logistical_feasibility` (from already-extracted facts — deadline runway, mode, fees — not invented fresh)
-- **Industry & Technical Media:** `voice_register_match` (does the outlet's actual published tone match the paper's register) · `timeliness` · `submission_model` (CFP-based open call vs. pitch-based)
-- **Corporate & Institutional:** `audience_fit` (policymaker/executive audience vs. practitioner) · `logistical_feasibility` (invite-only vs. open, application-gated vs. not)
-- **Other Avenues:** `theme_alignment` only, always with reasoning for why nothing else fit. Flag as lower-confidence — a signal to glance at manually, not a fully-trusted score.
+**Other Avenues:** `topic_fit` only, plus required `no_other_fit_reasoning` — why nothing else fit. Flagged lower-confidence: a signal to glance at manually, not a fully-trusted score.
 
-Equal weighting within whichever dimension set was selected (simple average). Don't hand-tune weights — there's no run data yet to justify any particular weighting.
+**Not scored, on purpose.** Deadline, location, fees and mode are facts, shown as columns in the email; the researcher judges them better than a score can, and scoring them double-counted them and penalised information the page simply didn't state. A venue whose call is closed or whose deadline has passed is not scored at all — code checks that before judge-fit runs.
+
+**Rules for every dimension:** read both texts and cite them, not general knowledge about the field; unknown is not bad — say so in the reasoning rather than scoring it down or assuming the best; score 0–100 (roughly: 80+ strong, 50–79 workable with caveats, under 50 poor); the reasoning explains the number rather than restating it.
+
+**Why one shape instead of per-bucket dimension sets:** a wrong venue tier now only changes the lens on `kind_fit`, instead of swapping the whole rubric — tier errors do less damage.
+
+Equal weighting across the dimensions (simple average). Don't hand-tune weights — there's no run data yet to justify any particular weighting.
 
 **Multi-bucket:** score each assigned bucket independently under `fit_by_tier`, never merged. Tracker and notifications list the conference once, with every bucket and score it qualified under.
 
@@ -215,7 +223,7 @@ Equal weighting within whichever dimension set was selected (simple average). Do
 3. **Extract** — per candidate: deadline (or its genuine absence) and its precision, submission status and opening, submission type, theme, location, format, fees, mode.
    - **Re-check tracked venues** — every open (`pending` or `applying`) tracked venue is re-fetched and re-extracted (light model only; no re-classify or re-score unless the profile changed). A change to `call_status` → `open` logs `submissions_opened`; a changed or newly-exact deadline logs `deadline_changed`.
 4. **Classify** — read the paper's own content (once per profile, cached) and the candidate's content separately; infer bucket(s) for each, with reasoning logged for both calls.
-5. **Judge fit** — score against the bucket(s) assigned, using that bucket's dimensions. The model scores each dimension with reasoning; it is never asked for `overall`, which code computes as the simple average.
+5. **Judge fit** — skipped entirely if the call is closed or the deadline has passed (a code check). Otherwise score each assigned bucket on `topic_fit`, `kind_fit` and `submission_fit`, with the bucket steering how `kind_fit` is judged. The model scores each dimension with reasoning; it is never asked for `overall`, which code computes as the simple average.
 6. **Update tracker** — write extraction + fit + reasoning, commit back.
 7. **Notify** — one digest email per run covering all profiles, always sent, even in a month with nothing new (it then says so, and still carries the Still open list). A conference enters the digest's New section only if fitness > 50%; below that, the tracker updates silently and it never appears. Because the digest always arrives on the 7th, a missing email is itself a visible sign the run failed.
 
@@ -240,7 +248,7 @@ This lets the researcher catch a misread immediately rather than trusting it sil
 | Conference | `name` |
 | Location | `extraction.location` |
 | Deadline | `extraction.deadline_as_stated`, or "Rolling" when `has_deadline: false` |
-| Call | `extraction.call_status` + `extraction.submission_opens`, rendered as a plain phrase: "Opens {submission_opens}" (`not_yet_open`) · "Open now" (`open`) · "Closed" (`closed`) · "Not stated on venue page" (`unknown`, or `not_yet_open` with no `submission_opens` stated) |
+| Call | `extraction.call_status` + `extraction.submission_opens`, rendered as "Opens November 2026" / "Open now" / "Closed" / "Not stated on venue page" |
 | Bucket(s) | `extraction.venue_tier` |
 | Fitness | `fit_by_tier.<bucket>.overall` (one row per bucket if multi-bucket) |
 | Per-dimension scores | `fit_by_tier.<bucket>.<dimension>` — score + reasoning |
@@ -332,7 +340,7 @@ The README must include a short setup section that lets someone else run their o
 1. Tracker schema (including the `profiles` block) + profile schema on disk, validated by hand against the JSON shapes above; confirm every email-table column maps to a schema field
 2. Extraction working end to end against one real, hardcoded venue page (https://eci2027.org/call-for-abstracts/ — exact deadline, month-only opening, no fees or mode stated, and footer links to an unrelated congress)
 3. Classify working against both demo profiles + a couple of real candidates, reasoning logged and legible
-4. Judge-fit wired to classify's bucket output, per-bucket dimensions applied correctly
+4. Judge-fit wired to classify's bucket output — the three dimensions, bucket-specific lens on `kind_fit`, closed/passed calls skipped by code; include a deliberate mismatch test (elephant-corridors × ECI 2027 should score low with clear reasoning)
 5. Tracker read/write, idempotent, tested with a second run against unchanged input; `decisions.json` sync, including the bad-key and bad-value errors
 6. Email template renderer — pure function from tracker fields to email body: digest (snapshot, New, Updates, Still open) and week-before reminder (with Also coming up); tested by printing output, no sending
 7. Email sending, tested standalone before wiring into notify logic — sends whatever the renderer produced to `NOTIFY_TO`, nothing more; confirm a rejected send surfaces as a visible failure
@@ -353,21 +361,17 @@ If time runs out, stop after whichever numbered item is last solid and demo from
 - Repo created (private), standard Python `.gitignore` (confirmed to cover `.env`), README stub in place (needs alignment — see below)
 - Git/Python/Node environment set up and verified
 - `src/config.py` — centralizes model choice (Haiku 4.5 for extraction, Sonnet 5 for judging) and `TRACKER_PATH`
-- `requirements.txt` — `anthropic`, `resend`, `python-dotenv`, `pydantic`
+- `requirements.txt` — `anthropic`, `resend`, `python-dotenv`, `pydantic`, `requests`
 - `src/llm.py` — the single `call_llm()` wrapper every model call routes through; logs input/output token counts per call
-- `.env.example` with `ANTHROPIC_API_KEY`, `RESEND_API_KEY`, `NOTIFY_TO`
-- Build step 1: `src/tracker_schema.py` and `src/profile_schema.py` (Pydantic, `extra="forbid"`, schema v3), with `tests/test_schema.py` (stdlib `unittest`) passing
+- `.env.example` with `ANTHROPIC_API_KEY`, `RESEND_API_KEY`, `NOTIFY_TO`; `decisions.json` as `{}`
+- Build step 1: schemas (`src/tracker_schema.py` v4, `src/profile_schema.py`, `src/decisions_schema.py`), `extra="forbid"`, with `tests/test_schema.py` (stdlib `unittest`) passing
+- Build step 2: `src/extract.py` — fetch, HTML-to-text, Haiku extraction into `ExtractionFacts`, today's date passed in, logs to gitignored `logs/`; verified against the ECI 2027 page
+- Build step 3: `src/classify.py` — paper and venue classify on Sonnet 5; both demo profiles in `profiles/`; `preferred_format` excluded from classify; list-coercion safety net logs a warning when it fires
 
 **Not yet done:**
 
-- Schema update for the decisions made after step 1: extraction's new fields (`deadline_precision`, `deadline_as_stated`, `submission_opens`, `call_status`, `location`), critical/optional fields, the `submissions_opened` notification reason, and a schema for `decisions.json`
-- Extraction, classify, judge-fit — no logic for any of the three
-- `tracker.json`, `decisions.json`, and tracker read/write logic
-- `profiles/` demo profile files
-- Email renderer and sending
-- GitHub Actions workflows — monthly loop (7th) and daily deadline watcher
-- Discovery (web search) and re-check of tracked venues
-- Eval sets — classify and extraction
+- Schema v5: replace the per-bucket fit models with one shape (`topic_fit`, `kind_fit`, `submission_fit`), Other Avenues keeping `topic_fit` + `no_other_fit_reasoning`; remove `preferred_format` from the profile schema and both profile files
+- Judge-fit (step 4) and everything after it: tracker read/write, email renderer and sending, discovery and re-check, GitHub Actions workflows, deadline watcher, README, eval sets
 
 **Repo hygiene to fix, not just build:**
 
