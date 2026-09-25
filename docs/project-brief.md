@@ -106,6 +106,7 @@ One entry per conference/venue. Facts about the venue are stored once, in `extra
         "call_status": "not_yet_open | open | closed | unknown",
         "submission_type": "...", "theme": "...",
         "location": "Florence, Italy | null",
+        "access": "open | invite_only | members_only | null",
         "format_requirements": "... | null",
         "fees": "... | null", "mode": "in-person | virtual | hybrid | null",
         "venue_tier": ["academic_practitioner"],
@@ -116,9 +117,9 @@ One entry per conference/venue. Facts about the venue are stored once, in `extra
         "elephant-corridors": {
           "fit_by_tier": {
             "academic_practitioner": {
-              "topic_fit": { "score": 80, "reasoning": "..." },
-              "kind_fit": { "score": 65, "reasoning": "..." },
-              "submission_fit": { "score": 60, "reasoning": "..." },
+              "theme_fit": { "score": 80, "reasoning": "..." },
+              "genre_fit": { "score": 65, "reasoning": "..." },
+              "format_fit": { "score": 60, "reasoning": "..." },
               "overall": 68, "scored_at": "...", "profile_hash": "..."
             }
           },
@@ -174,7 +175,7 @@ A small file at the repo root that **only the researcher edits** — the agent r
 - **Idempotency.** A re-run updates an existing entry, never duplicates one, and never repeats an email already logged in `notifications`.
 - **Per profile.** A candidate is scored against the profile whose search surfaced it. If a second profile's search later finds an already-tracked conference, that adds a second entry under `matches`, not a second conference.
 - **Stale scores.** `profile_hash` fingerprints the profile at scoring time. Open entries with a mismatched hash get re-scored on the next run; closed entries keep their score as history.
-- **Critical vs. optional fields.** Critical: the deadline (when `has_deadline: true`), `theme`, `submission_type`. Optional: `location`, `mode`, `fees`, `format_requirements`, `submission_opens`. Any field not stated on the page is null and listed in `missing_fields` — never guessed. `complete: false` only when a **critical** field is missing; a venue missing only optional fields is still scored. Incomplete venues are flagged rather than scored.
+- **Critical vs. optional fields.** Critical: the deadline (when `has_deadline: true`), `theme`, `submission_type`. Optional: `location`, `access`, `mode`, `fees`, `format_requirements`, `submission_opens`. Any field not stated on the page is null and listed in `missing_fields` — never guessed. `complete: false` only when a **critical** field is missing; a venue missing only optional fields is still scored. Incomplete venues are flagged rather than scored.
 - **Deadline precision.** `deadline_as_stated` is always the page's own wording. An exact date → `deadline_precision: exact`. A month only ("February 2027") → `deadline_precision: month`, with `deadline` set to the first day of that month. A later run that finds the exact date upgrades it and counts as `deadline_changed`.
 - **Who fills what.** Extraction (light model) fills the fact fields only. `venue_tier` and `venue_tier_reasoning` are written by classify (stronger model), never by extraction.
 - **Call status.** `call_status` describes the venue's call, not the researcher's submission — it records what the page says now, judged against today's date (passed to extraction): `not_yet_open`, `open`, `closed`, or `unknown`. `submission_opens` keeps the page's wording for when it opens.
@@ -193,20 +194,20 @@ Classify assigns the bucket(s); none are declared on the profile. Almost always 
 
 **Three dimensions, same names in every bucket.** Whatever the writing — empirical research, business process, economics, social observation — fit comes down to three questions, and a venue can fail any one while passing the other two:
 
-- **`topic_fit`** — *Is this paper's actual subject something this venue asks for?* The paper's core subject, not words it merely mentions, against the venue's stated topics, tracks and categories. Central overlap (fits a named track) scores high; a loose connection scores low.
-- **`kind_fit`** — *Does this venue publish this kind of writing, for this kind of reader?* The bucket tells the model what to look at:
+- **`theme_fit`** — *Does the venue want work on this paper's subject?* The paper's core subject, not words it merely mentions, against the venue's stated theme, topics, tracks and categories. Central overlap (fits a named track) scores high; a loose connection scores low.
+- **`genre_fit`** — *Does the venue publish this type of writing, for this kind of reader?* A genre is a type of text with its own conventions, register and expected audience — a research article, a trade feature, a policy brief. The bucket tells the model what to look at:
   - Academic & Practitioner — research rigor and method: would their reviewers accept this level of evidence?
   - Industry & Technical Media — voice and register: does the outlet publish writing that sounds like this?
   - Corporate & Institutional — audience: would policymakers or executives find it usable?
-- **`submission_fit`** — *Can this piece go in as it is?* Two things only: does the venue accept a form this paper can be submitted in (abstract, full paper, article, pitch, length limits) — judged by the model from the paper itself, noting any adaptation needed ("would need condensing to an abstract") — and is it open to submissions, or invite-only / members-only?
+- **`format_fit`** — *Can the paper be submitted in a form and length the venue accepts?* Size and shape only, not content: abstract, full paper, article, pitch, talk proposal, length limits. Judged by the model from the paper itself, noting any adaptation needed ("would need condensing to an abstract").
 
-**Other Avenues:** `topic_fit` only, plus required `no_other_fit_reasoning` — why nothing else fit. Flagged lower-confidence: a signal to glance at manually, not a fully-trusted score.
+**Other Avenues:** `theme_fit` only, plus required `no_other_fit_reasoning` — why nothing else fit. Flagged lower-confidence: a signal to glance at manually, not a fully-trusted score.
 
-**Not scored, on purpose.** Deadline, location, fees and mode are facts, shown as columns in the email; the researcher judges them better than a score can, and scoring them double-counted them and penalised information the page simply didn't state. A venue whose call is closed or whose deadline has passed is not scored at all — code checks that before judge-fit runs.
+**Not scored, on purpose.** Deadline, location, access, fees and mode are facts, shown as columns in the email; the researcher judges them better than a score can, and scoring them double-counted them and penalised information the page simply didn't state. A venue whose call is closed, whose deadline has passed, or whose `access` is `invite_only` is not scored at all — code checks that before judge-fit runs. `members_only` is shown, not skipped, since the researcher may be a member.
 
 **Rules for every dimension:** read both texts and cite them, not general knowledge about the field; unknown is not bad — say so in the reasoning rather than scoring it down or assuming the best; score 0–100 (roughly: 80+ strong, 50–79 workable with caveats, under 50 poor); the reasoning explains the number rather than restating it.
 
-**Why one shape instead of per-bucket dimension sets:** a wrong venue tier now only changes the lens on `kind_fit`, instead of swapping the whole rubric — tier errors do less damage.
+**Why one shape instead of per-bucket dimension sets:** a wrong venue tier now only changes the lens on `genre_fit`, instead of swapping the whole rubric — tier errors do less damage.
 
 Equal weighting across the dimensions (simple average). Don't hand-tune weights — there's no run data yet to justify any particular weighting.
 
@@ -219,13 +220,16 @@ Equal weighting across the dimensions (simple average). Don't hand-tune weights 
 **Every run, per profile:**
 
 1. **Trigger** — the 7th of every month, or `workflow_dispatch` on demand. Same code path either way. The first action of every run is syncing `decisions.json` into the tracker (see Researcher decisions).
-2. **Discover** — web search for candidate CFPs/venues matching the profile's topics.
+2. **Discover** — web search built from the paper's topics **and** its classification. This replaces the researcher declaring a preferred venue type: the agent reads the paper and decides where to look.
+   - **Main searches** (most queries): the paper's topics combined with the vocabulary of the paper's own bucket(s) — e.g. Academic: "call for papers", "call for abstracts"; Industry: "call for speakers", "call for presentations", "write for us"; Corporate & Institutional: "policy forum", "expert panel", "submissions invited".
+   - **Probe searches** (one query per remaining bucket, every run): the same topics with each other bucket's vocabulary. Classification is a prediction made from the paper alone; the probe lets real venues test it. New venues appear monthly, so the probe runs monthly — the paper doesn't need to change for it to find something new. A probe-found venue is judged exactly like any other; if the paper really doesn't suit that venue type, `genre_fit` is low and it stays silent.
+   - Found candidates are de-duplicated against the tracker: already-tracked open venues go to the re-check instead; closed ones are ignored.
 3. **Extract** — per candidate: deadline (or its genuine absence) and its precision, submission status and opening, submission type, theme, location, format, fees, mode.
    - **Re-check tracked venues** — every open (`pending` or `applying`) tracked venue is re-fetched and re-extracted (light model only; no re-classify or re-score unless the profile changed). A change to `call_status` → `open` logs `submissions_opened`; a changed or newly-exact deadline logs `deadline_changed`.
 4. **Classify** — read the paper's own content (once per profile, cached) and the candidate's content separately; infer bucket(s) for each, with reasoning logged for both calls.
-5. **Judge fit** — skipped entirely if the call is closed or the deadline has passed (a code check). Otherwise score each assigned bucket on `topic_fit`, `kind_fit` and `submission_fit`, with the bucket steering how `kind_fit` is judged. The model scores each dimension with reasoning; it is never asked for `overall`, which code computes as the simple average.
+5. **Judge fit** — skipped entirely if the call is closed, the deadline has passed, or access is invite-only (a code check). Otherwise score each assigned bucket on `theme_fit`, `genre_fit` and `format_fit`, with the bucket steering how `genre_fit` is judged. The model scores each dimension with reasoning; it is never asked for `overall`, which code computes as the simple average.
 6. **Update tracker** — write extraction + fit + reasoning, commit back.
-7. **Notify** — one digest email per run covering all profiles, always sent, even in a month with nothing new (it then says so, and still carries the Still open list). A conference enters the digest's New section only if fitness > 50%; below that, the tracker updates silently and it never appears. Because the digest always arrives on the 7th, a missing email is itself a visible sign the run failed.
+7. **Notify** — one digest email per run covering all profiles, always sent, even in a month with nothing new (it then says so, and still carries the Still open list). A conference enters the digest's New section only if fitness > 50%; below that, the tracker updates silently and it never appears — with one exception, the Tier Alert section (strong theme fit, low overall). Because the digest always arrives on the 7th, a missing email is itself a visible sign the run failed.
 
 Steps 3–6 repeat per candidate found in step 2.
 
@@ -233,13 +237,14 @@ Steps 3–6 repeat per candidate found in step 2.
 
 - (a) the bucket Cicadas classified the paper itself into
 - (b) 3–4 textual cues that drove that call
+- (b2) where Cicadas will mainly look: *"Cicadas will mainly look for these kinds of venues: …"* — the paper's bucket(s) as search targets, with a note that every other venue type still gets a light monthly probe
 - (c) score and reasoning — shown per-dimension, not just as a combined number
 
 This lets the researcher catch a misread immediately rather than trusting it silently for months. Every notification after the first — not just the first — shows the full per-dimension breakdown for each matched conference, not just the combined fitness score.
 
 **Email layout — fixed in code, never composed by the LLM.** The LLM's job ends at writing schema-validated fields into `tracker.json`. A deterministic template renders every email from those fields, so the layout is identical run after run and only the reasoning text varies. Any null field renders as "Not stated on venue page" — the honest wording comes from the template, never from the model. If a column needs a field the schema doesn't have, add it to the schema first; the template never computes or infers content.
 
-**Monthly digest (sent on the 7th) — three sections, in this order,** with the first-run snapshot block above them when a profile is new:
+**Monthly digest (sent on the 7th) — four sections, in this order,** with the first-run snapshot block above them when a profile is new:
 
 *1. New this month* — conferences whose `new_fit` is logged this run. Shown here **once only**, with full scores and rationale; never again with rationale.
 
@@ -247,6 +252,7 @@ This lets the researcher catch a misread immediately rather than trusting it sil
 |---|---|
 | Conference | `name` |
 | Location | `extraction.location` |
+| Access | `extraction.access` (open / members only) |
 | Deadline | `extraction.deadline_as_stated`, or "Rolling" when `has_deadline: false` |
 | Call | `extraction.call_status` + `extraction.submission_opens`, rendered as "Opens November 2026" / "Open now" / "Closed" / "Not stated on venue page" |
 | Bucket(s) | `extraction.venue_tier` |
@@ -256,7 +262,19 @@ This lets the researcher catch a misread immediately rather than trusting it sil
 | Link | `url` |
 | ID | `id` — what the researcher types into `decisions.json` |
 
-*2. Updates* — conferences already sent before that logged `submissions_opened` or `deadline_changed` this run. No rationale, no scores.
+*2. Tier Alert* — shown with the subtitle *"Strong topic match, low score: possibly misread venue type, or a format you'd need to adapt."* Conferences scored this run with **`theme_fit` ≥ 75 but `overall` < 50**, call not closed. These would otherwise be silent. The signature usually means a wrong venue tier (the genre-fit lens was wrong), a genuine genre mismatch, or a format mismatch the researcher could fix (e.g. the venue takes abstracts only). Shown **once only**, logged as `tier_alert`. The 75 is a named constant (`TIER_ALERT_THEME_MIN`) in `config.py`, computed purely from stored scores — no extra LLM call.
+
+| Column | Source field |
+|---|---|
+| Conference | `name` |
+| Location | `extraction.location` |
+| Deadline | `extraction.deadline_as_stated` |
+| Bucket(s) | `extraction.venue_tier` |
+| Theme fit · Overall | `fit_by_tier.<bucket>.theme_fit.score`, `overall` |
+| What pulled it down | the lowest-scoring dimension, with its reasoning |
+| Link · ID | `url`, `id` |
+
+*3. Updates* — conferences already sent before that logged `submissions_opened` or `deadline_changed` this run. No rationale, no scores.
 
 | Column | Source field |
 |---|---|
@@ -267,7 +285,7 @@ This lets the researcher catch a misread immediately rather than trusting it sil
 | Your decision | `matches.<profile>.decision` |
 | Link · ID | `url`, `id` |
 
-*3. Still open* — every tracked venue above the fitness threshold that is `pending` or `applying` and not past its deadline, sorted by deadline. One line each, no LLM involved.
+*4. Still open* — every tracked venue that is either above the fitness threshold and `pending`, or `applying` whatever its score, and not past its deadline, sorted by deadline. One line each, no LLM involved.
 
 | Column | Source field |
 |---|---|
@@ -277,16 +295,17 @@ This lets the researcher catch a misread immediately rather than trusting it sil
 | Your decision | `matches.<profile>.decision` |
 | ID | `id` |
 
-**Week-before reminder (daily watcher)** — one email per conference, sent on its own day. It names the conference (name, location, deadline, link, ID, current decision) and adds an **Also coming up** list: every other `pending`/`applying` deadline in the next 14 days (name, location, deadline). Several reminders in one week is expected; each conference is still reminded exactly once.
+**Week-before reminder (daily watcher)** — one email per conference, sent on its own day. It names the conference (name, location, deadline, link, ID, current decision) and adds an **Also coming up** list: every other reminder-eligible deadline (same rule as `week_before`) in the next 14 days (name, location, deadline). Several reminders in one week is expected; each conference is still reminded exactly once.
 
 ## Deadline watcher and closure
 
 Separate daily GitHub Actions workflow. Reads `decisions.json` then `tracker.json` — **no LLM, no web search**, plain date arithmetic. Reuses the email code. Runs at a different hour than the monthly workflow so they never commit at once.
 
 - **`new_fit`** (monthly run) — first time a match crosses 50%.
+- **`tier_alert`** (monthly run) — first time a match scores `theme_fit` ≥ 75 with `overall` < 50 and the call not closed. Shown once, in the digest's Tier Alert section.
 - **`submissions_opened`** (monthly run) — a re-check finds `call_status` changed to `open` on an already-sent venue.
 - **`deadline_changed`** (monthly run) — an open, `has_deadline: true` match whose deadline or its precision changed since last recorded (including month → exact date). Doesn't apply to rolling entries.
-- **`week_before`** (daily watcher) — only `has_deadline: true` entries, `pending` or `applying`, sent once per deadline: seven days before an exact date; for a month-only deadline, seven days before that month starts, labelled "exact date not published."
+- **`week_before`** (daily watcher) — only `has_deadline: true` entries that are either `applying` (whatever the score — the researcher's choice overrides it) or `pending` and above the 50% threshold; sent once per deadline: seven days before an exact date; for a month-only deadline, seven days before that month starts, labelled "exact date not published."
 - **Closure** — only `has_deadline: true` entries. Two days after the deadline (for a month-only deadline, two days after that month ends), any still-open match becomes `unconfirmed`, including ones that never crossed 50% (they were never emailed; their stored fit explains why). Closed entries are never reopened or re-scored, even if rediscovered later.
 - **Rolling entries (`has_deadline: false`)** — no week-before reminder, no date-based closure. Stay `pending` indefinitely until the researcher sets `applying`/`applied`/`skipped` in `decisions.json`. Not re-emailed on `new_fit` more than once.
 
@@ -340,11 +359,11 @@ The README must include a short setup section that lets someone else run their o
 1. Tracker schema (including the `profiles` block) + profile schema on disk, validated by hand against the JSON shapes above; confirm every email-table column maps to a schema field
 2. Extraction working end to end against one real, hardcoded venue page (https://eci2027.org/call-for-abstracts/ — exact deadline, month-only opening, no fees or mode stated, and footer links to an unrelated congress)
 3. Classify working against both demo profiles + a couple of real candidates, reasoning logged and legible
-4. Judge-fit wired to classify's bucket output — the three dimensions, bucket-specific lens on `kind_fit`, closed/passed calls skipped by code; include a deliberate mismatch test (elephant-corridors × ECI 2027 should score low with clear reasoning)
+4. Judge-fit wired to classify's bucket output — the three dimensions, bucket-specific lens on `genre_fit`, closed/passed/invite-only calls skipped by code; include a deliberate mismatch test (elephant-corridors × ECI 2027 should score low with clear reasoning)
 5. Tracker read/write, idempotent, tested with a second run against unchanged input; `decisions.json` sync, including the bad-key and bad-value errors
-6. Email template renderer — pure function from tracker fields to email body: digest (snapshot, New, Updates, Still open) and week-before reminder (with Also coming up); tested by printing output, no sending
+6. Email template renderer — pure function from tracker fields to email body: digest (snapshot, New, Tier Alert, Updates, Still open) and week-before reminder (with Also coming up); tested by printing output, no sending
 7. Email sending, tested standalone before wiring into notify logic — sends whatever the renderer produced to `NOTIFY_TO`, nothing more; confirm a rejected send surfaces as a visible failure
-8. Web search wired into discovery, re-check of tracked venues, full loop running end to end
+8. Discovery: main searches for the paper's bucket(s) plus one probe query per other bucket, de-duplication against the tracker, re-check of tracked venues, full loop running end to end
 9. GitHub Actions: monthly workflow on the 7th + `workflow_dispatch`, commit-back
 10. Deadline watcher: daily workflow, week-before (exact and month-only) + Also coming up + closure logic, tested against synthetic near-term deadlines
 11. README (incl. authorship disclosure and setup section)
@@ -364,13 +383,13 @@ If time runs out, stop after whichever numbered item is last solid and demo from
 - `requirements.txt` — `anthropic`, `resend`, `python-dotenv`, `pydantic`, `requests`
 - `src/llm.py` — the single `call_llm()` wrapper every model call routes through; logs input/output token counts per call
 - `.env.example` with `ANTHROPIC_API_KEY`, `RESEND_API_KEY`, `NOTIFY_TO`; `decisions.json` as `{}`
-- Build step 1: schemas (`src/tracker_schema.py` v5, `src/profile_schema.py`, `src/decisions_schema.py`), `extra="forbid"`, with `tests/test_schema.py` (stdlib `unittest`) passing
+- Build step 1: schemas (`src/tracker_schema.py` v4, `src/profile_schema.py`, `src/decisions_schema.py`), `extra="forbid"`, with `tests/test_schema.py` (stdlib `unittest`) passing
 - Build step 2: `src/extract.py` — fetch, HTML-to-text, Haiku extraction into `ExtractionFacts`, today's date passed in, logs to gitignored `logs/`; verified against the ECI 2027 page
 - Build step 3: `src/classify.py` — paper and venue classify on Sonnet 5; both demo profiles in `profiles/`; `preferred_format` excluded from classify; list-coercion safety net logs a warning when it fires
-- Schema v5: one fit shape (`topic_fit`, `kind_fit`, `submission_fit`) shared by Academic & Practitioner, Industry & Technical Media, and Corporate & Institutional (`StandardFit`); Other Avenues keeps `topic_fit` + `no_other_fit_reasoning` (`OtherAvenuesFit`); `preferred_format` removed from the profile schema and both files in `profiles/`; `fit_by_tier` keys still validated against `venue_tier`; `classify` confirmed to run unaffected
 
 **Not yet done:**
 
+- Schema v5: replace the per-bucket fit models with one shape (`theme_fit`, `genre_fit`, `format_fit`), Other Avenues keeping `theme_fit` + `no_other_fit_reasoning`; add `access` (open / invite_only / members_only, nullable) to ExtractionFacts; add `tier_alert` to NotificationReason and `TIER_ALERT_THEME_MIN = 75` to config.py; remove `preferred_format` from the profile schema and both profile files
 - Judge-fit (step 4) and everything after it: tracker read/write, email renderer and sending, discovery and re-check, GitHub Actions workflows, deadline watcher, README, eval sets
 
 **Repo hygiene to fix, not just build:**
