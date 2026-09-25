@@ -1,11 +1,29 @@
 """Judge fit: how well does a paper fit a venue, under a given bucket.
 
-Build step 4 (docs/project-brief.md, "Build order"). One LLM call (judging
-model) per (profile, bucket) pair: theme_fit, genre_fit, and format_fit for
-the three standard buckets; theme_fit + no_other_fit_reasoning for
-other_avenues. The bucket steers the lens judge_fit applies to genre_fit
-(brief, "Venue buckets and rubric") but the field names stay the same across
-buckets -- a wrong venue_tier only changes the lens, not the whole rubric.
+Build step 4 (docs/project-brief.md, "Build order"). Two LLM calls (judging
+model) per (profile, venue) pair, structurally separated so a wrong
+venue_tier can only ever move genre_fit:
+
+- **Tier-blind call** (once per venue, however many buckets it's assigned):
+  scores theme_fit and format_fit. It receives the profile, the venue's page
+  text, and its ExtractionFacts -- and nothing about venue_tier at all: no
+  bucket name, no lens, no venue_tier list. Neither dimension can be swayed
+  by which bucket classify picked, because the call has no way to know.
+- **Tier-aware call** (once per bucket in venue_tier): scores genre_fit only,
+  under that bucket's lens (brief, "Venue buckets and rubric" -- the bucket
+  tells the model what to look at for genre_fit specifically). Other Avenues
+  has no genre_fit at all; its tier-aware call produces no_other_fit_reasoning
+  instead.
+
+Code then assembles each bucket's fit entry from the shared theme_fit/
+format_fit plus that bucket's own genre_fit (or no_other_fit_reasoning) --
+same TierFit/StandardFit/OtherAvenuesFit shapes as before, no schema change.
+
+This split replaced an earlier single-call design after testing showed the
+tier label leaking into format_fit's reasoning even though format_fit has
+nothing to do with venue type -- a deliberately wrong tier moved format_fit's
+score, not just genre_fit's. Splitting the calls makes that structurally
+impossible instead of relying on prompt wording to keep the model in its lane.
 
 Skipped entirely, by code, before any model call, when the call is closed,
 its deadline has passed, or access is invite_only (brief, Workflow > step 5;
@@ -28,7 +46,7 @@ import datetime
 import sys
 from pathlib import Path
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from src.config import MODEL_JUDGE
 from src.tracker_schema import (
@@ -36,8 +54,6 @@ from src.tracker_schema import (
     CallStatus,
     DimensionScore,
     ExtractionFacts,
-    OtherAvenuesFit,
-    StandardFit,
     TIER_FIT_MODEL,
     TierFit,
     VenueTier,
@@ -84,92 +100,139 @@ a human reviewer would and weigh them.
 output."""
 
 
-def _standard_fit_system_prompt(bucket: VenueTier) -> str:
-    bucket_name = BUCKET_DISPLAY_NAMES[bucket]
-    genre_lens = GENRE_FIT_LENS[bucket]
-    return f"""You are the judge-fit step of Cicadas, a CFP tracker agent. You are given one paper's own \
-title, abstract, and keywords; one venue's full call-for-papers page text; and a few already-extracted \
-facts about that venue. Your job is to score how well the paper fits this venue, scored specifically under \
-the "{bucket_name}" bucket, on three dimensions: theme_fit, genre_fit, and format_fit.
+# --- Tier-blind call: theme_fit + format_fit, zero tier information -------
+
+TIER_BLIND_SYSTEM_PROMPT = f"""You are the judge-fit step of Cicadas, a CFP tracker agent. You are given \
+one paper's own title, abstract, and keywords; one venue's full call-for-papers page text; and a few \
+already-extracted facts about that venue. Your job here is to score exactly two dimensions: theme_fit and \
+format_fit. You are deliberately NOT told what type of venue this is, or how it's classified -- score these \
+two dimensions purely from the paper's and the venue page's own content, uninfluenced by venue type, \
+because neither dimension is supposed to depend on it.
 
 - theme_fit -- Does the venue want work on this paper's subject? Compare the paper's core subject -- not \
 words it merely mentions -- against the venue's stated theme, topics, tracks, and categories. Central \
 overlap with a named track or theme scores high; a loose or tangential connection scores low.
+- format_fit -- Can the paper be submitted in a form and length this venue accepts? Judge size and shape \
+only, not content: abstract, full paper, article, pitch, talk proposal, length limits -- reasoned from the \
+paper itself, noting any adaptation it would need (e.g. "would need condensing to a short abstract"). This \
+is about shape, not about what kind of venue this is -- a call for a 300-word abstract takes a 300-word \
+abstract regardless of the venue's audience or purpose.
+
+{_SHARED_RULES}
+
+Call record_theme_and_format_scores exactly once with your findings."""
+
+
+# --- Tier-aware call: genre_fit only, under one bucket's lens --------------
+
+def _genre_fit_system_prompt(bucket: VenueTier) -> str:
+    bucket_name = BUCKET_DISPLAY_NAMES[bucket]
+    genre_lens = GENRE_FIT_LENS[bucket]
+    return f"""You are the judge-fit step of Cicadas, a CFP tracker agent. You are given one paper's own \
+title, abstract, and keywords; one venue's full call-for-papers page text; and a few already-extracted \
+facts about that venue. This venue has been classified under the "{bucket_name}" bucket. Your only job here \
+is to score genre_fit under that bucket's lens.
+
 - genre_fit -- Does the venue publish this type of writing, for this kind of reader? A genre is a type of \
 text with its own conventions, register, and expected audience. For the "{bucket_name}" bucket specifically, \
 judge genre_fit on: {genre_lens}
-- format_fit -- Can the paper be submitted in a form and length this venue accepts? Judge size and shape \
-only, not content: abstract, full paper, article, pitch, talk proposal, length limits -- reasoned from the \
-paper itself, noting any adaptation it would need (e.g. "would need condensing to a short abstract").
 
 {_SHARED_RULES}
 
-Call record_fit_scores exactly once with your findings."""
+Call record_genre_fit_score exactly once with your findings."""
 
 
-OTHER_AVENUES_JUDGE_SYSTEM_PROMPT = f"""You are the judge-fit step of Cicadas, a CFP tracker agent. You are \
-given one paper's own title, abstract, and keywords; one venue's full call-for-papers page text; and a few \
-already-extracted facts about that venue. This venue has been classified as "Other Avenues" -- a catch-all \
-for when none of the three named buckets (Academic & Practitioner, Industry & Technical Media, Corporate & \
-Institutional) genuinely fit. Score only theme_fit here -- genre_fit and format_fit don't apply to a \
-catch-all with no venue-type lens to judge them against.
+# --- Tier-aware call for Other Avenues: no_other_fit_reasoning only --------
 
-- theme_fit -- Does the venue want work on this paper's subject? Compare the paper's core subject -- not \
-words it merely mentions -- against the venue's stated theme, topics, and categories.
-- no_other_fit_reasoning -- Explain, from the venue page's own content, why none of the three named buckets \
-genuinely fit this venue.
+OTHER_AVENUES_REASONING_SYSTEM_PROMPT = """You are the judge-fit step of Cicadas, a CFP tracker agent. You \
+are given one paper's own title, abstract, and keywords; one venue's full call-for-papers page text; and a \
+few already-extracted facts about that venue. This venue has been classified as "Other Avenues" -- a \
+catch-all used only when none of the three named buckets (Academic & Practitioner, Industry & Technical \
+Media, Corporate & Institutional) genuinely fit it. Your only job here is to explain why, grounded in the \
+venue page's own content -- not the paper's -- since this is about what kind of venue it is, not about fit.
 
-{_SHARED_RULES}
+Never use general knowledge about the field instead of the page's actual content. Never restate the bucket \
+definitions as if that were the reasoning -- point to what the page specifically says or doesn't say.
 
-Call record_other_avenues_fit exactly once with your findings."""
+Call record_no_other_fit_reasoning exactly once with your findings."""
 
 
-_DIMENSION_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "score": {
-            "type": "integer",
-            "minimum": 0,
-            "maximum": 100,
-            "description": "0-100: roughly 80+ strong, 50-79 workable with caveats, under 50 poor.",
-        },
-        "reasoning": {
-            "type": "string",
-            "description": "Cites the paper and the page; explains the score rather than restating it.",
-        },
-    },
-    "required": ["score", "reasoning"],
-}
+# Flat score/reasoning field pairs, not a nested object per dimension --
+# tool calls asking the model to build multiple nested objects in one turn
+# proved unreliable in testing (the model would occasionally collapse a
+# nested object into a raw JSON string instead of structured fields, failing
+# validation). Flat fields removed the failure in practice; each dimension is
+# reassembled into a DimensionScore in code right after the call returns.
+def _score_field(dimension: str) -> dict:
+    return {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 100,
+        "description": f"{dimension} score, 0-100: roughly 80+ strong, 50-79 workable with caveats, under 50 poor.",
+    }
 
-STANDARD_FIT_TOOL = {
-    "name": "record_fit_scores",
-    "description": "Record theme_fit, genre_fit, and format_fit for this venue-tier bucket.",
+
+def _reasoning_field(dimension: str) -> dict:
+    return {
+        "type": "string",
+        "description": f"Reasoning for the {dimension} score. Cites the paper and the page; explains the score rather than restating it.",
+    }
+
+
+TIER_BLIND_FIT_TOOL = {
+    "name": "record_theme_and_format_scores",
+    "description": "Record theme_fit and format_fit -- the two dimensions that don't depend on venue type.",
     "input_schema": {
         "type": "object",
         "properties": {
-            "theme_fit": _DIMENSION_SCHEMA,
-            "genre_fit": _DIMENSION_SCHEMA,
-            "format_fit": _DIMENSION_SCHEMA,
+            "theme_fit_score": _score_field("theme_fit"),
+            "theme_fit_reasoning": _reasoning_field("theme_fit"),
+            "format_fit_score": _score_field("format_fit"),
+            "format_fit_reasoning": _reasoning_field("format_fit"),
         },
-        "required": ["theme_fit", "genre_fit", "format_fit"],
+        "required": ["theme_fit_score", "theme_fit_reasoning", "format_fit_score", "format_fit_reasoning"],
     },
 }
 
-OTHER_AVENUES_FIT_TOOL = {
-    "name": "record_other_avenues_fit",
-    "description": "Record theme_fit and no_other_fit_reasoning for the Other Avenues catch-all bucket.",
+GENRE_FIT_TOOL = {
+    "name": "record_genre_fit_score",
+    "description": "Record genre_fit for this venue-tier bucket's lens.",
     "input_schema": {
         "type": "object",
         "properties": {
-            "theme_fit": _DIMENSION_SCHEMA,
+            "genre_fit_score": _score_field("genre_fit"),
+            "genre_fit_reasoning": _reasoning_field("genre_fit"),
+        },
+        "required": ["genre_fit_score", "genre_fit_reasoning"],
+    },
+}
+
+OTHER_AVENUES_REASONING_TOOL = {
+    "name": "record_no_other_fit_reasoning",
+    "description": "Record why none of the three named buckets genuinely fit this venue.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
             "no_other_fit_reasoning": {
                 "type": "string",
-                "description": "Why none of the three named buckets genuinely fit this venue.",
+                "description": "Grounded in the venue page's own content.",
             },
         },
-        "required": ["theme_fit", "no_other_fit_reasoning"],
+        "required": ["no_other_fit_reasoning"],
     },
 }
+
+
+class _TierBlindFit(BaseModel):
+    """The tier-blind call's own output shape -- assembled into a full
+    StandardFit/OtherAvenuesFit alongside a bucket's tier-aware result. Not a
+    tracker.json shape itself, so it lives here rather than in
+    tracker_schema.py (no schema change)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    theme_fit: DimensionScore
+    format_fit: DimensionScore
 
 
 def _tool_input(response, tool_name: str) -> dict:
@@ -227,35 +290,113 @@ def skip_reason(extraction: ExtractionFacts, today: datetime.date) -> str | None
     return None
 
 
-def judge_fit(
+def judge_theme_and_format(
+    profile: Profile,
+    extraction: ExtractionFacts,
+    page_text: str,
+    url: str,
+) -> _TierBlindFit:
+    """The tier-blind call. Once per (profile, venue), regardless of how many
+    buckets that venue is assigned -- venue_tier is never passed in, so this
+    call has no way to let a bucket influence theme_fit or format_fit."""
+    response = call_llm(
+        model=MODEL_JUDGE,
+        system=TIER_BLIND_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": _build_user_content(profile, extraction, page_text, url)}],
+        tools=[TIER_BLIND_FIT_TOOL],
+        tool_choice={"type": "tool", "name": "record_theme_and_format_scores"},
+        max_tokens=1500,
+    )
+    tool_output = _tool_input(response, "record_theme_and_format_scores")
+    return _TierBlindFit.model_validate(
+        {
+            "theme_fit": {
+                "score": tool_output["theme_fit_score"],
+                "reasoning": tool_output["theme_fit_reasoning"],
+            },
+            "format_fit": {
+                "score": tool_output["format_fit_score"],
+                "reasoning": tool_output["format_fit_reasoning"],
+            },
+        }
+    )
+
+
+def judge_genre_fit(
     profile: Profile,
     extraction: ExtractionFacts,
     page_text: str,
     url: str,
     bucket: VenueTier,
-) -> TierFit:
-    """Score one (profile, bucket) pair. Caller is responsible for having
-    already checked skip_reason -- this function always makes a model call."""
-    model_cls = TIER_FIT_MODEL[bucket]
-    if bucket == VenueTier.OTHER_AVENUES:
-        tool, tool_name, system = OTHER_AVENUES_FIT_TOOL, "record_other_avenues_fit", OTHER_AVENUES_JUDGE_SYSTEM_PROMPT
-    else:
-        tool, tool_name, system = STANDARD_FIT_TOOL, "record_fit_scores", _standard_fit_system_prompt(bucket)
-
+) -> DimensionScore:
+    """The tier-aware call for one of the three standard buckets. Never
+    called for Other Avenues -- see judge_no_other_fit_reasoning."""
     response = call_llm(
         model=MODEL_JUDGE,
-        system=system,
+        system=_genre_fit_system_prompt(bucket),
         messages=[{"role": "user", "content": _build_user_content(profile, extraction, page_text, url)}],
-        tools=[tool],
-        tool_choice={"type": "tool", "name": tool_name},
-        max_tokens=2000,
+        tools=[GENRE_FIT_TOOL],
+        tool_choice={"type": "tool", "name": "record_genre_fit_score"},
+        max_tokens=1000,
     )
-    tool_output = _tool_input(response, tool_name)
+    tool_output = _tool_input(response, "record_genre_fit_score")
+    return DimensionScore.model_validate(
+        {"score": tool_output["genre_fit_score"], "reasoning": tool_output["genre_fit_reasoning"]}
+    )
+
+
+def judge_no_other_fit_reasoning(
+    profile: Profile,
+    extraction: ExtractionFacts,
+    page_text: str,
+    url: str,
+) -> str:
+    """The tier-aware call for the Other Avenues bucket -- reasoning instead
+    of a genre_fit score, since the catch-all has no lens to score against."""
+    response = call_llm(
+        model=MODEL_JUDGE,
+        system=OTHER_AVENUES_REASONING_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": _build_user_content(profile, extraction, page_text, url)}],
+        tools=[OTHER_AVENUES_REASONING_TOOL],
+        tool_choice={"type": "tool", "name": "record_no_other_fit_reasoning"},
+        max_tokens=800,
+    )
+    tool_output = _tool_input(response, "record_no_other_fit_reasoning")
+    return tool_output["no_other_fit_reasoning"]
+
+
+def _assemble_fit(
+    bucket: VenueTier,
+    tier_blind: _TierBlindFit,
+    profile: Profile,
+    *,
+    genre_fit: DimensionScore | None = None,
+    no_other_fit_reasoning: str | None = None,
+) -> TierFit:
+    """Combines the shared tier-blind theme_fit/format_fit with one bucket's
+    own tier-aware result into that bucket's TierFit shape (StandardFit or
+    OtherAvenuesFit -- see TIER_FIT_MODEL). No schema change: this is the
+    same shape the old single-call design produced, just assembled from two
+    calls instead of populated by one."""
+    model_cls = TIER_FIT_MODEL[bucket]
+    common = {
+        "scored_at": datetime.datetime.now(datetime.timezone.utc),
+        "profile_hash": profile.content_hash(),
+    }
+    if bucket == VenueTier.OTHER_AVENUES:
+        return model_cls.model_validate(
+            {
+                "theme_fit": tier_blind.theme_fit.model_dump(),
+                "no_other_fit_reasoning": no_other_fit_reasoning,
+                **common,
+            }
+        )
     return model_cls.model_validate(
         {
-            **tool_output,
-            "scored_at": datetime.datetime.now(datetime.timezone.utc),
-            "profile_hash": profile.content_hash(),
+            "theme_fit": tier_blind.theme_fit.model_dump(),
+            "genre_fit": genre_fit.model_dump(),
+            "format_fit": tier_blind.format_fit.model_dump(),
+            **common,
         }
     )
 
@@ -267,10 +408,18 @@ def judge_fit_for_venue(
     url: str,
     venue_tier: list[VenueTier],
     today: datetime.date | None = None,
+    tier_blind: _TierBlindFit | None = None,
 ) -> dict[VenueTier, TierFit]:
     """Judges every bucket in `venue_tier` independently (brief: "never
     averaged across buckets"). Returns {} -- logging why, visibly -- when the
-    code-level skip check fires; otherwise one TierFit per bucket."""
+    code-level skip check fires; otherwise one TierFit per bucket, assembled
+    from one shared tier-blind call plus one tier-aware call per bucket.
+
+    `tier_blind` lets a caller supply an already-computed tier-blind result
+    instead of making a fresh one -- used by this module's own tier-
+    sensitivity test (see main()) to guarantee theme_fit/format_fit are
+    identical when the same (profile, venue) pair is re-scored under a
+    different bucket; ordinary callers omit it and get one computed here."""
     if today is None:
         today = datetime.datetime.now(datetime.timezone.utc).date()
 
@@ -279,10 +428,20 @@ def judge_fit_for_venue(
         print(f"[judge_fit] SKIPPED {profile.id} x {url}: {reason}")
         return {}
 
+    if tier_blind is None:
+        print(f"[judge_fit] tier-blind call (theme_fit + format_fit, no tier info): {profile.id} x {url}")
+        tier_blind = judge_theme_and_format(profile, extraction, page_text, url)
+
     result: dict[VenueTier, TierFit] = {}
     for bucket in venue_tier:
-        print(f"[judge_fit] scoring {profile.id} x {url} under bucket={bucket.value}")
-        result[bucket] = judge_fit(profile, extraction, page_text, url, bucket)
+        if bucket == VenueTier.OTHER_AVENUES:
+            print(f"[judge_fit] tier-aware call (no_other_fit_reasoning): {profile.id} x {url}")
+            reasoning = judge_no_other_fit_reasoning(profile, extraction, page_text, url)
+            result[bucket] = _assemble_fit(bucket, tier_blind, profile, no_other_fit_reasoning=reasoning)
+        else:
+            print(f"[judge_fit] tier-aware call (genre_fit, bucket={bucket.value}): {profile.id} x {url}")
+            genre = judge_genre_fit(profile, extraction, page_text, url, bucket)
+            result[bucket] = _assemble_fit(bucket, tier_blind, profile, genre_fit=genre)
     return result
 
 
@@ -310,6 +469,23 @@ def _print_result(label: str, fit_by_tier: dict[VenueTier, TierFit]) -> None:
 
 def _dimension_names(fit: TierFit) -> list[str]:
     return [name for name, value in fit.__dict__.items() if isinstance(value, DimensionScore)]
+
+
+def _print_summary_table(rows: list[tuple[str, VenueTier, TierFit | None]]) -> None:
+    print("\n=== Summary table ===")
+    header = f"{'Test':<45} {'bucket':<24} {'theme':>6} {'genre':>6} {'format':>7} {'overall':>8}"
+    print(header)
+    print("-" * len(header))
+    for label, bucket, fit in rows:
+        if fit is None:
+            print(f"{label:<45} {bucket.value:<24} {'--':>6} {'--':>6} {'--':>7} {'--':>8}")
+            continue
+        theme = fit.theme_fit.score
+        genre = getattr(fit, "genre_fit", None)
+        genre_s = genre.score if genre is not None else "--"
+        fmt = getattr(fit, "format_fit", None)
+        fmt_s = fmt.score if fmt is not None else "--"
+        print(f"{label:<45} {bucket.value:<24} {theme:>6} {genre_s!s:>6} {fmt_s!s:>7} {fit.overall:>8}")
 
 
 def _print_tier_sensitivity(
@@ -366,8 +542,20 @@ def main() -> None:
         print(f"[judge_fit] real venue_tier = {[t.value for t in real_tier]}")
         print(f"[judge_fit] venue_tier_reasoning: {venue_classification.venue_tier_reasoning}")
 
+        # Test 1 and Test 3 re-score the SAME (profile, venue) pair under two
+        # different tiers. They share one tier-blind call -- computed once,
+        # here -- so theme_fit/format_fit are guaranteed identical between
+        # them, isolating whatever the tier swap does to genre_fit/overall.
+        print(
+            "\n[judge_fit] --- shared tier-blind call for immune-tolerance x ECI 2027 "
+            "(reused by Test 1 and Test 3) ---"
+        )
+        it_tier_blind = judge_theme_and_format(immune_tolerance, extraction, page_text, url)
+
         print("\n[judge_fit] --- Test 1: immune-tolerance x ECI 2027, real tier ---")
-        test1 = judge_fit_for_venue(immune_tolerance, extraction, page_text, url, real_tier)
+        test1 = judge_fit_for_venue(
+            immune_tolerance, extraction, page_text, url, real_tier, tier_blind=it_tier_blind
+        )
 
         print("\n[judge_fit] --- Test 2: elephant-corridors x ECI 2027, real tier (deliberate mismatch) ---")
         test2 = judge_fit_for_venue(elephant_corridors, extraction, page_text, url, real_tier)
@@ -377,7 +565,9 @@ def main() -> None:
             "\n[judge_fit] --- Test 3: immune-tolerance x ECI 2027, "
             "deliberately wrong tier (industry_technical_media) ---"
         )
-        test3 = judge_fit_for_venue(immune_tolerance, extraction, page_text, url, wrong_tier)
+        test3 = judge_fit_for_venue(
+            immune_tolerance, extraction, page_text, url, wrong_tier, tier_blind=it_tier_blind
+        )
     except (RuntimeError, ValidationError) as exc:
         print(f"[judge_fit] FAILED: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -388,6 +578,13 @@ def main() -> None:
 
     baseline_bucket = real_tier[0]
     wrong_bucket = wrong_tier[0]
+    _print_summary_table(
+        [
+            ("Test 1 -- immune-tolerance (real tier)", baseline_bucket, test1.get(baseline_bucket)),
+            ("Test 2 -- elephant-corridors (real tier, mismatch)", baseline_bucket, test2.get(baseline_bucket)),
+            ("Test 3 -- immune-tolerance (wrong tier)", wrong_bucket, test3.get(wrong_bucket)),
+        ]
+    )
     _print_tier_sensitivity(
         baseline_bucket,
         test1.get(baseline_bucket),
