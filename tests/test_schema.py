@@ -20,9 +20,8 @@ from decisions_schema import DecisionsFile, ResearcherDecision, find_untracked_i
 from profile_schema import Profile
 from tracker_schema import (
     SCHEMA_VERSION,
-    AcademicPractitionerFit,
+    TIER_FIT_MODEL,
     ConferenceEntry,
-    CorporateInstitutionalFit,
     DimensionScore,
     Extraction,
     ExtractionFacts,
@@ -31,7 +30,9 @@ from tracker_schema import (
     OtherAvenuesFit,
     ProfileClassification,
     ProfileMatch,
+    StandardFit,
     TrackerFile,
+    VenueTier,
 )
 
 
@@ -65,23 +66,11 @@ def make_extraction_facts(**overrides):
     return base
 
 
-def make_academic_fit(**overrides):
+def make_standard_fit(**overrides):
     base = dict(
-        theme_alignment={"score": 80, "reasoning": "on-theme"},
-        nature_fit={"score": 60, "reasoning": "research-rigor framing"},
-        logistical_feasibility={"score": 70, "reasoning": "ample runway"},
-        scored_at="2026-10-01T09:00:00Z",
-        profile_hash="h1",
-    )
-    base.update(overrides)
-    return base
-
-
-def make_corporate_fit(**overrides):
-    base = dict(
-        theme_alignment={"score": 80, "reasoning": "on-theme"},
-        audience_fit={"score": 65, "reasoning": "policymaker-heavy"},
-        logistical_feasibility={"score": 60, "reasoning": "invite-only"},
+        topic_fit={"score": 80, "reasoning": "on-theme"},
+        kind_fit={"score": 60, "reasoning": "research-rigor framing"},
+        submission_fit={"score": 70, "reasoning": "ample runway"},
         scored_at="2026-10-01T09:00:00Z",
         profile_hash="h1",
     )
@@ -115,7 +104,7 @@ class TestFitByTierMatchesVenueTier(unittest.TestCase):
             extraction=make_extraction(venue_tier=["academic_practitioner"]),
             matches={
                 "p1": ProfileMatch(
-                    fit_by_tier={"academic_practitioner": make_academic_fit()},
+                    fit_by_tier={"academic_practitioner": make_standard_fit()},
                 )
             },
         )
@@ -133,7 +122,7 @@ class TestFitByTierMatchesVenueTier(unittest.TestCase):
                     "p1": ProfileMatch(
                         # scored under corporate_institutional, but the venue
                         # was only ever classified as academic_practitioner
-                        fit_by_tier={"corporate_institutional": make_corporate_fit()},
+                        fit_by_tier={"corporate_institutional": make_standard_fit()},
                     )
                 },
             )
@@ -144,7 +133,7 @@ class TestExtraForbid(unittest.TestCase):
 
     def test_valid_no_extra_fields(self):
         DimensionScore(score=80, reasoning="fine")
-        Profile(id="x", title="t", abstract="a", keywords=["k"], preferred_format="talk")
+        Profile(id="x", title="t", abstract="a", keywords=["k"])
 
     def test_invalid_extra_field_rejected(self):
         with self.assertRaises(ValidationError):
@@ -155,7 +144,6 @@ class TestExtraForbid(unittest.TestCase):
                 title="t",
                 abstract="a",
                 keywords=["k"],
-                preferred_format="talk",
                 bogus_field="nope",
             )
 
@@ -165,14 +153,14 @@ class TestOverallComputed(unittest.TestCase):
     supplied-then-checked."""
 
     def test_valid_overall_computed_from_dimensions(self):
-        fit = AcademicPractitionerFit(**make_academic_fit())
+        fit = StandardFit(**make_standard_fit())
         # (80 + 60 + 70) / 3 = 70
         self.assertEqual(fit.overall, 70)
 
     def test_previously_invalid_now_silently_corrected(self):
         # Under the old rule this raised (overall didn't match the average).
         # Now it must NOT raise — the supplied value is simply overwritten.
-        fit = AcademicPractitionerFit(**make_academic_fit(overall=1))
+        fit = StandardFit(**make_standard_fit(overall=1))
         self.assertNotEqual(fit.overall, 1)
         self.assertEqual(fit.overall, 70)
 
@@ -237,7 +225,7 @@ class TestMatchProfileIdsExistInProfiles(unittest.TestCase):
             extraction=make_extraction(venue_tier=["academic_practitioner"]),
             matches={
                 "p1": ProfileMatch(
-                    fit_by_tier={"academic_practitioner": make_academic_fit()},
+                    fit_by_tier={"academic_practitioner": make_standard_fit()},
                 )
             },
         )
@@ -279,7 +267,7 @@ class TestOtherAvenuesRequiresReasoning(unittest.TestCase):
 
     def test_valid_with_reasoning(self):
         OtherAvenuesFit(
-            theme_alignment={"score": 40, "reasoning": "loose thematic overlap only"},
+            topic_fit={"score": 40, "reasoning": "loose thematic overlap only"},
             no_other_fit_reasoning="doesn't fit any of the other three buckets",
             scored_at="2026-10-01T09:00:00Z",
             profile_hash="h1",
@@ -288,10 +276,29 @@ class TestOtherAvenuesRequiresReasoning(unittest.TestCase):
     def test_invalid_without_reasoning(self):
         with self.assertRaises(ValidationError):
             OtherAvenuesFit(
-                theme_alignment={"score": 40, "reasoning": "loose thematic overlap only"},
+                topic_fit={"score": 40, "reasoning": "loose thematic overlap only"},
                 scored_at="2026-10-01T09:00:00Z",
                 profile_hash="h1",
             )
+
+
+class TestOneShapeAcrossBuckets(unittest.TestCase):
+    """Rule 8b (v5): all three non-catch-all buckets share one dimension
+    shape (topic_fit, kind_fit, submission_fit) instead of per-bucket
+    dimension sets."""
+
+    def test_valid_all_three_standard_buckets_map_to_standard_fit(self):
+        for tier in (
+            VenueTier.ACADEMIC_PRACTITIONER,
+            VenueTier.INDUSTRY_TECHNICAL_MEDIA,
+            VenueTier.CORPORATE_INSTITUTIONAL,
+        ):
+            self.assertIs(TIER_FIT_MODEL[tier], StandardFit)
+        self.assertIs(TIER_FIT_MODEL[VenueTier.OTHER_AVENUES], OtherAvenuesFit)
+
+    def test_invalid_standard_fit_rejects_bucket_specific_dimension(self):
+        with self.assertRaises(ValidationError):
+            StandardFit(**make_standard_fit(nature_fit={"score": 60, "reasoning": "stale v4 field"}))
 
 
 class TestExtractionFactsSplit(unittest.TestCase):
@@ -423,18 +430,18 @@ class TestSubmissionsOpenedNotificationReason(unittest.TestCase):
             NotificationEntry(date="2026-11-01", reason="bogus_reason", deadline=None)
 
 
-class TestSchemaVersionV4(unittest.TestCase):
-    """Rule 16 (v4): schema bumped to version 4; a stale version 3 file must
+class TestSchemaVersionV5(unittest.TestCase):
+    """Rule 16 (v5): schema bumped to version 5; a stale version 4 file must
     not silently validate."""
 
-    def test_valid_schema_version_is_4(self):
-        self.assertEqual(SCHEMA_VERSION, 4)
+    def test_valid_schema_version_is_5(self):
+        self.assertEqual(SCHEMA_VERSION, 5)
         tf = TrackerFile()
-        self.assertEqual(tf.schema_version, 4)
+        self.assertEqual(tf.schema_version, 5)
 
-    def test_invalid_schema_version_3_rejected(self):
+    def test_invalid_schema_version_4_rejected(self):
         with self.assertRaises(ValidationError):
-            TrackerFile(schema_version=3)
+            TrackerFile(schema_version=4)
 
 
 class TestDecisionsSchema(unittest.TestCase):

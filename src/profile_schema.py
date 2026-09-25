@@ -31,11 +31,6 @@ class Profile(BaseModel):
         min_length=1,
         description="Keywords/topics used to drive discovery search and classify.",
     )
-    preferred_format: str = Field(
-        ...,
-        min_length=1,
-        description="e.g. 'full paper', 'poster', 'talk' — free text; the brief doesn't constrain values.",
-    )
 
     def content_hash(self) -> str:
         """Fingerprint of this profile's substantive content.
@@ -57,7 +52,6 @@ class Profile(BaseModel):
                 "title": self.title,
                 "abstract": self.abstract,
                 "keywords": sorted(self.keywords),
-                "preferred_format": self.preferred_format,
             },
             sort_keys=True,
         )

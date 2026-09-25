@@ -364,13 +364,13 @@ If time runs out, stop after whichever numbered item is last solid and demo from
 - `requirements.txt` — `anthropic`, `resend`, `python-dotenv`, `pydantic`, `requests`
 - `src/llm.py` — the single `call_llm()` wrapper every model call routes through; logs input/output token counts per call
 - `.env.example` with `ANTHROPIC_API_KEY`, `RESEND_API_KEY`, `NOTIFY_TO`; `decisions.json` as `{}`
-- Build step 1: schemas (`src/tracker_schema.py` v4, `src/profile_schema.py`, `src/decisions_schema.py`), `extra="forbid"`, with `tests/test_schema.py` (stdlib `unittest`) passing
+- Build step 1: schemas (`src/tracker_schema.py` v5, `src/profile_schema.py`, `src/decisions_schema.py`), `extra="forbid"`, with `tests/test_schema.py` (stdlib `unittest`) passing
 - Build step 2: `src/extract.py` — fetch, HTML-to-text, Haiku extraction into `ExtractionFacts`, today's date passed in, logs to gitignored `logs/`; verified against the ECI 2027 page
 - Build step 3: `src/classify.py` — paper and venue classify on Sonnet 5; both demo profiles in `profiles/`; `preferred_format` excluded from classify; list-coercion safety net logs a warning when it fires
+- Schema v5: one fit shape (`topic_fit`, `kind_fit`, `submission_fit`) shared by Academic & Practitioner, Industry & Technical Media, and Corporate & Institutional (`StandardFit`); Other Avenues keeps `topic_fit` + `no_other_fit_reasoning` (`OtherAvenuesFit`); `preferred_format` removed from the profile schema and both files in `profiles/`; `fit_by_tier` keys still validated against `venue_tier`; `classify` confirmed to run unaffected
 
 **Not yet done:**
 
-- Schema v5: replace the per-bucket fit models with one shape (`topic_fit`, `kind_fit`, `submission_fit`), Other Avenues keeping `topic_fit` + `no_other_fit_reasoning`; remove `preferred_format` from the profile schema and both profile files
 - Judge-fit (step 4) and everything after it: tracker read/write, email renderer and sending, discovery and re-check, GitHub Actions workflows, deadline watcher, README, eval sets
 
 **Repo hygiene to fix, not just build:**

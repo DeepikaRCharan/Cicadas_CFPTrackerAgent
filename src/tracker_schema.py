@@ -21,7 +21,7 @@ from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 class StrictModel(BaseModel):
@@ -247,11 +247,14 @@ class DimensionScore(StrictModel):
 
 
 class TierFitBase(StrictModel):
-    """Fields every bucket's fit score carries, regardless of which extra
-    dimensions that bucket adds. Never instantiated directly — see the four
-    bucket-specific subclasses below."""
+    """Fields every bucket's fit score carries. Never instantiated directly
+    — see StandardFit and OtherAvenuesFit below.
 
-    theme_alignment: DimensionScore
+    v5 (brief, "Venue buckets and rubric"): one dimension shape for every
+    bucket instead of per-bucket dimension sets — a wrong venue_tier now
+    only changes the lens judge-fit applies to kind_fit, instead of swapping
+    the whole rubric."""
+
     overall: int = Field(
         0,
         description=(
@@ -282,23 +285,23 @@ class TierFitBase(StrictModel):
         return self
 
 
-class AcademicPractitionerFit(TierFitBase):
-    nature_fit: DimensionScore
-    logistical_feasibility: DimensionScore
+class StandardFit(TierFitBase):
+    """The shared three-dimension rubric for Academic & Practitioner,
+    Industry & Technical Media, and Corporate & Institutional (brief:
+    "same names in every bucket" — kind_fit's lens on what "kind" means
+    shifts per bucket, but the field itself doesn't)."""
 
-
-class IndustryTechnicalMediaFit(TierFitBase):
-    voice_register_match: DimensionScore
-    timeliness: DimensionScore
-    submission_model: DimensionScore
-
-
-class CorporateInstitutionalFit(TierFitBase):
-    audience_fit: DimensionScore
-    logistical_feasibility: DimensionScore
+    topic_fit: DimensionScore
+    kind_fit: DimensionScore
+    submission_fit: DimensionScore
 
 
 class OtherAvenuesFit(TierFitBase):
+    """Other Avenues keeps topic_fit only, plus the required
+    no_other_fit_reasoning — kind_fit and submission_fit don't apply to a
+    catch-all bucket with no venue-type lens to judge them against."""
+
+    topic_fit: DimensionScore
     no_other_fit_reasoning: str = Field(
         ...,
         min_length=1,
@@ -306,21 +309,19 @@ class OtherAvenuesFit(TierFitBase):
     )
     low_confidence: bool = Field(
         True,
-        description="Theme-alignment-only scores are a signal to glance at manually, never fully trusted.",
+        description="topic_fit-only scores are a signal to glance at manually, never fully trusted.",
     )
 
 
-TierFit = (
-    AcademicPractitionerFit | IndustryTechnicalMediaFit | CorporateInstitutionalFit | OtherAvenuesFit
-)
+TierFit = StandardFit | OtherAvenuesFit
 
 # Which model a given bucket's fit_by_tier entry must validate against — the
 # "validator branches on what venue_tier actually contains" rule from the
 # brief, made concrete.
 TIER_FIT_MODEL: dict[VenueTier, type[TierFitBase]] = {
-    VenueTier.ACADEMIC_PRACTITIONER: AcademicPractitionerFit,
-    VenueTier.INDUSTRY_TECHNICAL_MEDIA: IndustryTechnicalMediaFit,
-    VenueTier.CORPORATE_INSTITUTIONAL: CorporateInstitutionalFit,
+    VenueTier.ACADEMIC_PRACTITIONER: StandardFit,
+    VenueTier.INDUSTRY_TECHNICAL_MEDIA: StandardFit,
+    VenueTier.CORPORATE_INSTITUTIONAL: StandardFit,
     VenueTier.OTHER_AVENUES: OtherAvenuesFit,
 }
 
