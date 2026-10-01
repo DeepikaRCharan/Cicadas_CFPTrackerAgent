@@ -381,6 +381,10 @@ class IdentityConflict(StrictModel):
     profile_id: str = Field(..., min_length=1, description="The profile whose search surfaced the candidate.")
     first_flagged: datetime
     last_flagged: datetime
+    reported: bool = Field(
+        False,
+        description="False until a digest carrying this conflict's 'Needs a look' line was sent successfully -- so each conflict appears once.",
+    )
 
 
 class ProfileClassification(StrictModel):

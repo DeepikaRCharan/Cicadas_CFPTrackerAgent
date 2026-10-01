@@ -500,3 +500,42 @@ def mark_reported(reports: list[PendingReport]) -> None:
     those entries stay unreported and go out with the next email."""
     for report in reports:
         report.entry.reported = True
+
+
+@dataclass
+class ReportReceipt:
+    """Everything one rendered email carried (src/render.py builds it).
+    References point into the same in-memory TrackerFile the email was
+    rendered from -- apply with mark_sent before reloading it."""
+
+    notifications: list[PendingReport] = field(default_factory=list)
+    conflicts: list[IdentityConflict] = field(default_factory=list)
+    snapshot_profile_ids: list[str] = field(default_factory=list)
+
+
+def mark_sent(tracker: TrackerFile, receipt: ReportReceipt, sent_on: datetime.date) -> None:
+    """After a successful send only: flag the receipt's notifications and
+    conflicts reported and stamp snapshot_sent on its snapshot profiles.
+    Then save_tracker."""
+    mark_reported(receipt.notifications)
+    for conflict in receipt.conflicts:
+        conflict.reported = True
+    for profile_id in receipt.snapshot_profile_ids:
+        tracker.profiles[profile_id].snapshot_sent = sent_on
+
+
+# --- Selection rules shared by the digest and the daily watcher --------------
+
+
+def above_new_fit(match: ProfileMatch) -> bool:
+    return any(f.overall > NEW_FIT_MIN for f in match.fit_by_tier.values())
+
+
+def is_reminder_eligible(conference: ConferenceEntry, match: ProfileMatch) -> bool:
+    """Brief, Deadline watcher > week_before: has_deadline entries that are
+    `applying` (whatever the score) or `pending` and above the threshold."""
+    if not conference.extraction.has_deadline:
+        return False
+    return match.decision == DecisionState.APPLYING or (
+        match.decision == DecisionState.PENDING and above_new_fit(match)
+    )
