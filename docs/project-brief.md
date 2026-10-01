@@ -81,7 +81,7 @@ One entry per conference/venue. Facts about the venue are stored once, in `extra
 
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 6,
   "last_run": "2026-10-01T09:00:00Z",
   "profiles": {
     "elephant-corridors": {
@@ -125,13 +125,15 @@ One entry per conference/venue. Facts about the venue are stored once, in `extra
           },
           "decision": "pending",
           "notifications": [
-            { "date": "2026-10-01", "reason": "new_fit", "deadline": "2026-12-15" }
+            { "date": "2026-10-01", "reason": "new_fit", "deadline": "2026-12-15",
+              "run_at": "2026-10-01T09:00:00Z", "reported": false }
           ],
           "notes": ""
         }
       }
     }
-  ]
+  ],
+  "identity_conflicts": []
 }
 ```
 
@@ -152,7 +154,9 @@ A small file at the repo root that **only the researcher edits** — the agent r
 
 - Allowed values: `applying`, `applied`, `skipped` — the researcher's three states only. `pending` and `unconfirmed` are agent-only and are an error here.
 - Read at the start of **every** run, monthly and daily watcher, before anything else. Its values are copied into `matches.<profile>.decision` for every profile under that conference.
-- A key that isn't a tracked conference `id`, or a value outside the three allowed, stops the run with a visible error naming the bad line. Never guessed, never skipped.
+- A value outside the three allowed (or a key repeated twice) stops the run with a visible error naming the bad line. Never guessed, never skipped.
+- A key that isn't a tracked conference `id` is a **WARNING in the run log** naming that line (stderr, and a GitHub Actions annotation when running there) — not a debug line — and the run continues; the line is ignored, never guessed at.
+- Decisions are copied only into **live** profiles' matches. A swapped-out profile's matches are frozen history and are not touched.
 - No line for a conference means no researcher decision: it stays `pending` (or `unconfirmed` once the agent closes it).
 - A researcher decision always wins over the agent's: setting `applied` or `skipped` on an `unconfirmed` entry is allowed and simply records the truth.
 - Known limitation: one decision per conference, applied to every profile matched to it. Per-profile decisions are not in v1.
@@ -170,9 +174,10 @@ A small file at the repo root that **only the researcher edits** — the agent r
 
 **Rules:**
 
-- **Identity.** `id` = normalized name + year. A found conference counts as already-tracked if its `id` *or* its URL matches either an existing entry. Domain alone is never enough (hosts like EasyChair carry many conferences) — merging two real conferences silently is worse than an occasional duplicate.
+- **Identity.** `id` = normalized name + year; the URL (normalized, full path and query) is a secondary check. A found conference is merged into an existing entry only when its `id` **and** URL both agree. Same `id` but a different URL, or the same URL and year under a different name, is **flagged** in `identity_conflicts` and logged as a warning — never merged, never created as a second entry. Same URL with a different year is a separate venue (sites reuse one CFP page every year). Domain alone is never enough (hosts like EasyChair carry many conferences) — merging two real conferences silently is worse than an occasional duplicate.
 - **Ownership.** Agent creates entries (`pending`), writes `extraction`/`matches`/`notifications`, and makes exactly one status change itself: closing to `unconfirmed`. The researcher sets `applying`/`applied`/`skipped` via `decisions.json` only; the agent copies them in and never infers them. `notes` stays in the schema but is unused in v1.
 - **Idempotency.** A re-run updates an existing entry, never duplicates one, and never repeats an email already logged in `notifications`.
+- **Reported vs. logged.** Every `notifications` entry starts `reported: false`. The digest selects entries where `reported` is false, and the flag flips to true only after a successful send — so if the email fails after the tracker merge, those entries go out with the next email instead of being lost. `run_at` (the run that logged the entry) is kept as history only, never used to select digest content.
 - **Per profile.** A candidate is scored against the profile whose search surfaced it. If a second profile's search later finds an already-tracked conference, that adds a second entry under `matches`, not a second conference.
 - **Stale scores.** `profile_hash` fingerprints the profile at scoring time. Open entries with a mismatched hash get re-scored on the next run; closed entries keep their score as history.
 - **Critical vs. optional fields.** Critical: the deadline (when `has_deadline: true`), `theme`, `submission_type`. Optional: `location`, `access`, `mode`, `fees`, `format_requirements`, `submission_opens`. Any field not stated on the page is null and listed in `missing_fields` — never guessed. `complete: false` only when a **critical** field is missing; a venue missing only optional fields is still scored. Incomplete venues are flagged rather than scored.
@@ -394,11 +399,12 @@ If time runs out, stop after whichever numbered item is last solid and demo from
 - Build step 3: `src/classify.py` — paper and venue classify on Sonnet 5; both demo profiles in `profiles/`; `preferred_format` excluded from classify; list-coercion safety net logs a warning when it fires
 - Schema v5: one fit shape (`theme_fit`, `genre_fit`, `format_fit`) replacing the per-bucket models, Other Avenues keeping `theme_fit` + `no_other_fit_reasoning`; `access` (open / invite_only / members_only, nullable) added to `ExtractionFacts` and to the extraction prompt/tool schema; `tier_alert` added to `NotificationReason` and `TIER_ALERT_THEME_MIN = 75` added to `config.py`; `preferred_format` confirmed absent from the profile schema and both profile files; `tests/test_schema.py` at 46 tests, all passing; re-verified against the ECI 2027 page live (`access` correctly comes back null with `missing_fields: ["access", ...]`)
 - Extraction tweak: a page publishing an open call inviting submissions (call for abstracts/papers/speakers, or similarly public submission instructions) now counts as stating `access: open`, even without the word "open" itself — the one deliberate exception to "never infer" (`src/extract.py`, prompt + tool schema). Null stays reserved for pages that give no indication either way. Re-verified live against the ECI 2027 page: `access` now comes back `"open"`, no longer null/`missing_fields`.
+- Build step 5: `src/tracker.py` — tracker read/write and the `decisions.json` sync, no LLM calls. Schema v6: `NotificationEntry` gains `run_at` (history) and `reported` (default false; the digest's selector, flipped only after a successful send via `mark_reported`, wired in step 7), `TrackerFile` gains `identity_conflicts`, and duplicate conference ids are rejected. `NEW_FIT_MIN = 50` and `DECISIONS_PATH` added to `config.py`. Identity: id = normalized name + year, merged only when id and normalized URL agree; disagreements flagged, not merged (brief Identity rule updated). `decisions.json`: bad value or duplicate key stops the run naming the line; an untracked id is a run-log WARNING and the run continues (brief rule updated); a deleted line reverts a researcher-set decision to `pending`; frozen profiles' matches are skipped. `new_fit`/`tier_alert` logged at most once per match from stored scores; `submissions_opened`/`deadline_changed` logged on re-check only for matches already sent. `save_tracker` re-validates the whole file and writes atomically (temp file + `os.replace`); `tracker.json` is untouched on any failure; a corrupt `tracker.json` stops the run rather than being overwritten. `tests/test_tracker.py` (27 tests, temp files, no API calls) covers: idempotent second run, same name/different year, same name+year/different URL flagged, `decisions.json` edits (set, change, delete) on the next run, unknown id warning, invalid entry and failed replace leaving `tracker.json` byte-identical, profile swap keeping old entries frozen, and entries staying unreported when the send never happens. `tests/test_schema.py` at 50 tests. All 77 passing.
 - Build step 4: `src/judge_fit.py` — judge-fit on Sonnet 5. First version made one call per (profile, bucket) scoring all three dimensions together; testing showed a deliberately wrong tier moved `format_fit` as well as `genre_fit`, so it was restructured into two calls (see brief, Workflow > step 5): a tier-blind call (once per venue) scoring `theme_fit`/`format_fit` with no `venue_tier` information at all, and a tier-aware call (once per bucket) scoring `genre_fit` only (or `no_other_fit_reasoning` for Other Avenues) under that bucket's lens; code assembles the two into each bucket's fit entry. Tool schemas use flat `<dimension>_score`/`<dimension>_reasoning` fields rather than a nested object per dimension — nested objects were occasionally malformed by the model (a JSON object collapsed into a raw string), flat fields fixed it in testing. Code-level skip (closed call / passed deadline / `invite_only`) before any model call, logged visibly. Model never asked for `overall` — `TierFitBase` computes it. Validated against `TIER_FIT_MODEL`; no schema change. `python -m src.judge_fit` runs three live tests against ECI 2027 (real tier via `classify_venue`, sharing one tier-blind call between tests 1 and 3 to isolate the comparison): immune-tolerance under its real tier scored 82 overall (theme 96 / genre 85 / format 65); elephant-corridors under the same real tier scored 11 (clear mismatch reasoning); immune-tolerance rescored under a deliberately wrong tier (`industry_technical_media`) dropped to 59, with `theme_fit` and `format_fit` unchanged (96, 65 — same tier-blind call) and the entire swing confined to `genre_fit` (85→15) as designed.
 
 **Not yet done:**
 
-- Everything after step 4: tracker read/write, email renderer and sending, discovery and re-check, GitHub Actions workflows, deadline watcher, README, eval sets
+- Everything after step 5: email renderer and sending, discovery and re-check, GitHub Actions workflows, deadline watcher, README, eval sets
 
 **Repo hygiene to fix, not just build:**
 

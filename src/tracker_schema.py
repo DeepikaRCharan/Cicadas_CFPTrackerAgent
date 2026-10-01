@@ -21,7 +21,7 @@ from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 class StrictModel(BaseModel):
@@ -347,6 +347,40 @@ class NotificationEntry(StrictModel):
     date: date
     reason: NotificationReason
     deadline: date | None = None
+    run_at: datetime = Field(
+        ...,
+        description="TrackerFile.last_run of the run that logged this entry. History only — never used to pick what goes in a digest (see `reported`).",
+    )
+    reported: bool = Field(
+        False,
+        description=(
+            "False until an email carrying this entry has actually been sent. "
+            "The digest selects entries where this is False, and it flips to "
+            "True only after a successful send — so a run whose email fails "
+            "after the tracker merge still reports these entries next time."
+        ),
+    )
+
+
+class IdentityConflictReason(str, Enum):
+    SAME_ID_DIFFERENT_URL = "same_id_different_url"
+    SAME_URL_SAME_YEAR_DIFFERENT_NAME = "same_url_same_year_different_name"
+
+
+class IdentityConflict(StrictModel):
+    """A found candidate whose id and URL disagree with an existing entry
+    (brief, Rules > Identity): flagged here, never merged into that entry
+    and never created as a second one."""
+
+    reason: IdentityConflictReason
+    candidate_id: str = Field(..., min_length=1)
+    candidate_name: str
+    candidate_url: str
+    existing_id: str = Field(..., min_length=1)
+    existing_url: str
+    profile_id: str = Field(..., min_length=1, description="The profile whose search surfaced the candidate.")
+    first_flagged: datetime
+    last_flagged: datetime
 
 
 class ProfileClassification(StrictModel):
@@ -476,6 +510,10 @@ class TrackerFile(StrictModel):
         description="Keyed by profile id. One entry per profile ever onboarded, including swapped-out ones (frozen, not removed).",
     )
     conferences: list[ConferenceEntry] = Field(default_factory=list)
+    identity_conflicts: list[IdentityConflict] = Field(
+        default_factory=list,
+        description="Candidates flagged rather than merged because id and URL disagreed with an existing entry.",
+    )
 
     @model_validator(mode="after")
     def _pin_schema_version(self) -> "TrackerFile":
@@ -483,6 +521,15 @@ class TrackerFile(StrictModel):
             raise ValueError(
                 f"schema_version {self.schema_version} != expected {SCHEMA_VERSION}; migrate before writing"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _conference_ids_unique(self) -> "TrackerFile":
+        seen: set[str] = set()
+        for conference in self.conferences:
+            if conference.id in seen:
+                raise ValueError(f"duplicate conference id {conference.id!r} — one entry per venue")
+            seen.add(conference.id)
         return self
 
     @model_validator(mode="after")

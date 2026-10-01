@@ -425,26 +425,26 @@ class TestSubmissionsOpenedNotificationReason(unittest.TestCase):
     """Rule 15 (v4): NotificationReason gains submissions_opened."""
 
     def test_valid_submissions_opened_reason(self):
-        entry = NotificationEntry(date="2026-11-01", reason="submissions_opened", deadline=None)
+        entry = NotificationEntry(date="2026-11-01", reason="submissions_opened", deadline=None, run_at="2026-11-01T09:00:00Z")
         self.assertEqual(entry.reason, NotificationReason.SUBMISSIONS_OPENED)
 
     def test_invalid_unknown_reason(self):
         with self.assertRaises(ValidationError):
-            NotificationEntry(date="2026-11-01", reason="bogus_reason", deadline=None)
+            NotificationEntry(date="2026-11-01", reason="bogus_reason", deadline=None, run_at="2026-11-01T09:00:00Z")
 
 
-class TestSchemaVersionV5(unittest.TestCase):
-    """Rule 16 (v5): schema bumped to version 5; a stale version 4 file must
+class TestSchemaVersionV6(unittest.TestCase):
+    """Rule 16 (v6): schema bumped to version 6; a stale version 5 file must
     not silently validate."""
 
-    def test_valid_schema_version_is_5(self):
-        self.assertEqual(SCHEMA_VERSION, 5)
+    def test_valid_schema_version_is_6(self):
+        self.assertEqual(SCHEMA_VERSION, 6)
         tf = TrackerFile()
-        self.assertEqual(tf.schema_version, 5)
+        self.assertEqual(tf.schema_version, 6)
 
-    def test_invalid_schema_version_4_rejected(self):
+    def test_invalid_schema_version_5_rejected(self):
         with self.assertRaises(ValidationError):
-            TrackerFile(schema_version=4)
+            TrackerFile(schema_version=5)
 
 
 class TestDecisionsSchema(unittest.TestCase):
@@ -505,11 +505,40 @@ class TestTierAlertNotificationReason(unittest.TestCase):
     is the named constant (75) computed purely from stored scores."""
 
     def test_valid_tier_alert_reason(self):
-        entry = NotificationEntry(date="2026-11-01", reason="tier_alert", deadline=None)
+        entry = NotificationEntry(date="2026-11-01", reason="tier_alert", deadline=None, run_at="2026-11-01T09:00:00Z")
         self.assertEqual(entry.reason, NotificationReason.TIER_ALERT)
 
     def test_valid_tier_alert_threshold_constant(self):
         self.assertEqual(TIER_ALERT_THEME_MIN, 75)
+
+
+class TestV6TrackerAdditions(unittest.TestCase):
+    """Rule 22 (v6): NotificationEntry carries run_at (history) and reported
+    (default False -- the digest's selector); conference ids are unique;
+    identity_conflicts defaults to empty."""
+
+    def test_valid_reported_defaults_false(self):
+        entry = NotificationEntry(date="2026-11-01", reason="new_fit", run_at="2026-11-01T09:00:00Z")
+        self.assertFalse(entry.reported)
+
+    def test_invalid_notification_without_run_at(self):
+        with self.assertRaises(ValidationError):
+            NotificationEntry(date="2026-11-01", reason="new_fit")
+
+    def test_valid_empty_identity_conflicts(self):
+        self.assertEqual(TrackerFile().identity_conflicts, [])
+
+    def test_invalid_duplicate_conference_ids(self):
+        conference = dict(
+            id="c1",
+            name="Conf",
+            url="https://example.org",
+            first_seen="2026-10-01T09:00:00Z",
+            last_checked="2026-10-01T09:00:00Z",
+            extraction=make_extraction(),
+        )
+        with self.assertRaises(ValidationError):
+            TrackerFile(conferences=[conference, dict(conference, url="https://other.org")])
 
 
 class TestPreferredFormatRemoved(unittest.TestCase):

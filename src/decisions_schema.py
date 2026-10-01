@@ -38,9 +38,9 @@ class DecisionsFile(RootModel[dict[str, ResearcherDecision]]):
 def find_untracked_ids(decisions: dict[str, ResearcherDecision], tracked_ids: set[str]) -> list[str]:
     """Every decisions.json key that isn't a tracked conference id.
 
-    Brief: "A key that isn't a tracked conference id ... stops the run with
-    a visible error naming the bad line. Never guessed, never skipped."
-    Returns the offending ids (sorted, for a stable error message); the
-    caller turns a non-empty result into that visible, run-stopping error.
+    Brief: a key that isn't a tracked conference id is a WARNING in the run
+    log naming that line, and the run continues -- the line is ignored,
+    never guessed at. Returns the offending ids (sorted, for a stable
+    message); src/tracker.py's sync_decisions turns each into that warning.
     """
     return sorted(set(decisions) - tracked_ids)
