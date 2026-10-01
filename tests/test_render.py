@@ -24,6 +24,7 @@ from tests import render_fixtures as fx
 
 EMAILS = fx.build()
 FIRST, SECOND, QUIET, REMINDER = EMAILS.values()
+FINAL_TRACKER = fx.build.tracker  # captured now: later fixture builds (test_notify) replace it
 
 
 def section(body: str, title: str) -> str:
@@ -42,7 +43,10 @@ class TestDigestLayout(unittest.TestCase):
     def test_snapshot_comes_first_on_first_run_only(self):
         self.assertEqual(FIRST.body.count("FIRST LOOK:"), 2)
         self.assertLess(FIRST.body.index("FIRST LOOK:"), FIRST.body.index("NEW THIS MONTH"))
-        self.assertIn("Cicadas will mainly look for these kinds of venues: Academic & Practitioner.", FIRST.body)
+        self.assertEqual(FIRST.body.count("Cicadas will mainly look for"), 1)
+        self.assertEqual(FIRST.body.count("Each conference below is scored per dimension"), 1)
+        self.assertEqual(FIRST.body.count("Main search:   Academic & Practitioner"), 2)
+        self.assertLess(FIRST.body.rindex("FIRST LOOK:"), FIRST.body.index("Cicadas will mainly look for"))
         self.assertEqual(sorted(FIRST.receipt.snapshot_profile_ids), [fx.ELEPHANT, fx.IMMUNE])
         self.assertNotIn("FIRST LOOK:", SECOND.body)
         self.assertEqual(SECOND.receipt.snapshot_profile_ids, [])
@@ -97,7 +101,7 @@ class TestSelection(unittest.TestCase):
         self.assertEqual(len(SECOND.receipt.conflicts), 1)
         # re-flagged in run 3, but already reported
         self.assertIn("Nothing to check.", section(QUIET.body, "Needs a look"))
-        self.assertTrue(fx.build.tracker.identity_conflicts[0].reported)
+        self.assertTrue(FINAL_TRACKER.identity_conflicts[0].reported)
 
     def test_still_open_rule_and_order(self):
         still = section(QUIET.body, "Still open")
@@ -107,13 +111,13 @@ class TestSelection(unittest.TestCase):
         self.assertEqual(names, ["ECI 2027", "Kyoto Treg Biology Symposium 2027", "Mongabay contributor pitches"])
 
     def test_still_open_drops_passed_deadline(self):
-        after = render_digest(fx.build.tracker, fx.load_profiles(), datetime.date(2027, 4, 2))
+        after = render_digest(FINAL_TRACKER, fx.load_profiles(), datetime.date(2027, 4, 2))
         self.assertNotIn("ECI 2027", section(after.body, "Still open"))  # 31 March passed
         self.assertIn("Kyoto", section(after.body, "Still open"))  # month-only: April not over yet
 
     def test_frozen_profile_not_in_still_open_or_snapshot(self):
         live = {fx.IMMUNE: fx.load_profiles()[fx.IMMUNE]}
-        email = render_digest(fx.build.tracker, live, datetime.date(2026, 12, 7))
+        email = render_digest(FINAL_TRACKER, live, datetime.date(2026, 12, 7))
         self.assertNotIn("Mongabay", section(email.body, "Still open"))
 
 
@@ -165,7 +169,7 @@ class TestReceipt(unittest.TestCase):
 
 class TestPurity(unittest.TestCase):
     def test_render_is_deterministic_and_does_not_mutate(self):
-        tracker = fx.build.tracker
+        tracker = FINAL_TRACKER
         before = copy.deepcopy(tracker.model_dump())
         a = render_digest(tracker, fx.load_profiles(), datetime.date(2026, 12, 7))
         b = render_digest(tracker, fx.load_profiles(), datetime.date(2026, 12, 7))

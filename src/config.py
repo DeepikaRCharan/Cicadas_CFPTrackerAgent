@@ -26,3 +26,13 @@ TIER_ALERT_THEME_MIN = 75
 # New-fit threshold (brief, Workflow > Notify): a match enters the digest's
 # New section only if some bucket's overall is strictly above this.
 NEW_FIT_MIN = 50
+
+# Where live paper profiles live, and how many may be live at once (brief,
+# Data model > Paper profiles: a deliberate cost cap, not a bug).
+PROFILES_DIR = "profiles"
+MAX_LIVE_PROFILES = 2
+
+# Sender for every Cicadas email. Resend's shared onboarding address works
+# without a verified domain, but only delivers to the Resend account's own
+# email -- which is what NOTIFY_TO is (brief, Setup section).
+RESEND_FROM = "Cicadas <onboarding@resend.dev>"

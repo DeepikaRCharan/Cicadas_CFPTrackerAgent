@@ -171,9 +171,13 @@ def _run(tracker, now, candidates, decisions, profiles):
         upsert_venue(tracker, live_profile_ids=live, now=now, decisions=decisions, **candidate)
 
 
-def build() -> dict[str, RenderedEmail]:
+def build(stop_after_first_run: bool = False) -> dict[str, RenderedEmail]:
     """Run the three months and the reminder; return every rendered email,
-    in order. Each digest is 'sent' (mark_sent) before the next run."""
+    in order. Each digest is 'sent' (mark_sent) before the next run.
+
+    stop_after_first_run: stop once run 1's digest is rendered, before it is
+    marked sent -- build.tracker is then the unsent first-run state (used
+    for the real test send in step 7)."""
     profiles = load_profiles()
     immune, elephant = profiles[IMMUNE], profiles[ELEPHANT]
     tracker = TrackerFile()
@@ -225,6 +229,9 @@ def build() -> dict[str, RenderedEmail]:
             mongabay,
         ], {}, profiles)
         emails["1. First run (7 Oct 2026)"] = digest = render_digest(tracker, profiles, RUN_1.date())
+        if stop_after_first_run:
+            build.tracker = tracker
+            return emails
         mark_sent(tracker, digest.receipt, RUN_1.date())
 
         # --- Run 2: update, tier alert, new month-only venue, conflict --------

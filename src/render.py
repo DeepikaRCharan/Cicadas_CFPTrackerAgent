@@ -221,16 +221,20 @@ def _snapshot(tracker: TrackerFile, profiles: dict[str, Profile]) -> tuple[list[
             *(_bullet(cue, 2) for cue in classification.paper_bucket_cues),
             "Reasoning:",
             _para(classification.paper_bucket_reasoning, 2),
+            _field("Main search", buckets, 0),
             "",
+        ]
+    if ids:
+        lines += [
             _para(
-                f"Cicadas will mainly look for these kinds of venues: {buckets}. "
-                "Every other venue type still gets a light monthly probe.",
+                "Cicadas will mainly look for the venue types listed as 'Main search' under each paper "
+                "above. Every other venue type still gets a light monthly probe.",
                 0,
             ),
             _para(
                 "Each conference below is scored per dimension (theme, genre, format) "
-                "with its reasoning, here and in every email after this one. If this "
-                "read of your paper looks wrong, the scores will be too.",
+                "with its reasoning, here and in every email after this one. If a read "
+                "of your paper looks wrong, its scores will be too.",
                 0,
             ),
             "",

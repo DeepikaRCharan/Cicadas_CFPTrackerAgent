@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -56,3 +57,23 @@ class Profile(BaseModel):
             sort_keys=True,
         )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def load_live_profiles(directory: str | Path | None = None) -> dict[str, Profile]:
+    """Every profile in profiles/, keyed by id. Refuses to run with more
+    than MAX_LIVE_PROFILES (brief: a deliberate cost cap), or when a file's
+    id doesn't match its filename stem."""
+    from src.config import MAX_LIVE_PROFILES, PROFILES_DIR
+
+    paths = sorted(Path(directory or PROFILES_DIR).glob("*.json"))
+    if len(paths) > MAX_LIVE_PROFILES:
+        raise ValueError(
+            f"{len(paths)} profiles in {directory or PROFILES_DIR}/ -- at most {MAX_LIVE_PROFILES} may be live at once"
+        )
+    profiles: dict[str, Profile] = {}
+    for path in paths:
+        profile = Profile.model_validate_json(path.read_text(encoding="utf-8"))
+        if profile.id != path.stem:
+            raise ValueError(f"{path} has id {profile.id!r} -- the id must match the filename stem")
+        profiles[profile.id] = profile
+    return profiles
