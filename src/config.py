@@ -39,8 +39,10 @@ RESEND_FROM = "Cicadas <onboarding@resend.dev>"
 
 # --- Discovery (build step 8) -----------------------------------------------
 
-# The discovery loop's model (overridable per run with --discovery-model).
-MODEL_DISCOVERY = "claude-sonnet-5"
+# The discovery loop's model (overridable per run with --discovery-model). Haiku 4.5
+# since step 8 verification: it fits the per-profile ceiling; Sonnet 5
+# (dynamic-filtering web tools) is the alternative.
+MODEL_DISCOVERY = "claude-haiku-4-5-20251001"
 
 # Web tool versions per loop model. The _20260209 versions (dynamic
 # filtering) need Sonnet 5 or later; Haiku 4.5 takes the basic versions.
@@ -52,21 +54,21 @@ WEB_TOOL_TYPES = {
 # Where each run's readable decision trace is written (committed, unlike logs/).
 TRACES_DIR = "traces"
 
-# Hard limits per profile per run, sized for a $0.25-per-profile ceiling
+# Hard limits per profile per run, sized for a $0.30-per-profile ceiling
 # (loop + hand-off). Hitting one stops that resource (or the loop) cleanly
 # and is logged; there is no retry or fallback that could quietly spend past
 # them (CLAUDE.md: the spend cap is a backstop, not a plan).
 DISCOVERY_MAX_TURNS = 12
-DISCOVERY_MAX_SEARCHES = 5  # 2 main + 3 probes
+DISCOVERY_MAX_SEARCHES = 6  # 3 main + 3 probes
 DISCOVERY_PROBE_RESERVE = 3  # of the searches, kept for one probe per other bucket
-DISCOVERY_MAX_FETCHES = 3  # the model judges from search snippets unless it truly needs the page
+DISCOVERY_MAX_FETCHES = 4  # the model judges from search snippets unless it truly needs the page
 DISCOVERY_MAX_CANDIDATES = 2
 # Cap on how much of one fetched page enters the loop's context.
 DISCOVERY_FETCH_MAX_CONTENT_TOKENS = 5000
 # Estimated spend at which the loop stops (checked between turns, from the
-# API's usage report). Leaves room under the $0.25-per-profile ceiling for
+# API's usage report). Leaves room under the $0.30-per-profile ceiling for
 # the hand-off calls that follow.
-DISCOVERY_MAX_LOOP_COST_USD = 0.18
+DISCOVERY_MAX_LOOP_COST_USD = 0.22  # same share of the ceiling as $0.18 of $0.25
 # For projecting the next turn's cost from the budget actually left (see
 # discover._project_next_turn): tokens one search's results add (measured
 # about 9.5k on the basic tool), a turn's output, and the most searches and

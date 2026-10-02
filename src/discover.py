@@ -117,18 +117,23 @@ class DiscoveryResult:
 # --- Queries -------------------------------------------------------------------
 
 
-def build_queries(profile: Profile, classification: ProfileClassification) -> tuple[list[str], dict[VenueTier, str]]:
-    """Seed queries from the profile (brief, Workflow > step 2). No year:
-    the model adds one when it refines.
+def build_queries(
+    profile: Profile, classification: ProfileClassification, today: datetime.date
+) -> tuple[list[str], dict[VenueTier, str]]:
+    """Seed queries from the profile (brief, Workflow > step 2).
 
     - Main: the first two keywords, each paired with one of the paper's own
-      bucket's phrases, for every bucket the paper was classified into.
+      bucket's phrases, for every bucket the paper was classified into --
+      the first with the current year, the second with the next year (bare
+      seeds returned only published articles in live runs).
     - Probes: one per other bucket -- the first keyword with that bucket's
-      first phrase."""
+      first phrase, no year."""
     topics = profile.keywords[:2]
+    years = (today.year, today.year + 1)
     main: list[str] = []
     for bucket in classification.paper_bucket:
-        main += [f"{topic} {phrase}" for topic, phrase in zip(topics, BUCKET_VOCABULARY[bucket.value])]
+        main += [f"{topic} {phrase} {year}"
+                 for topic, phrase, year in zip(topics, BUCKET_VOCABULARY[bucket.value], years)]
     probes = {
         bucket: f"{topics[0]} {BUCKET_VOCABULARY[bucket.value][0]}"
         for bucket in VenueTier
@@ -779,7 +784,7 @@ def discover(
     if call is None:
         from src.llm import call_llm as call
     limits = limits or Limits()
-    main, probes = build_queries(profile, classification)
+    main, probes = build_queries(profile, classification, today)
     if model not in WEB_TOOL_TYPES:
         raise ValueError(f"no web tool versions configured for {model!r} (config.WEB_TOOL_TYPES)")
     state = _State(limits=limits, probes=probes, model=model)

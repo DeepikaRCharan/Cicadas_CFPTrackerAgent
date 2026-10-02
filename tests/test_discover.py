@@ -136,13 +136,14 @@ class DiscoverTestCase(unittest.TestCase):
 
 
 class TestQueries(DiscoverTestCase):
-    def test_seed_queries_from_profile_without_year(self):
-        main, probes = build_queries(self.profile, self.classification)
-        self.assertEqual(main, ["Regulatory T cells call for papers", "Foxp3 call for abstracts"])
+    def test_seed_queries_from_profile(self):
+        main, probes = build_queries(self.profile, self.classification, TODAY)
+        # main seeds: current year, then next year; probes: no year
+        self.assertEqual(main, ["Regulatory T cells call for papers 2026", "Foxp3 call for abstracts 2027"])
         self.assertEqual(set(probes), {VenueTier.INDUSTRY_TECHNICAL_MEDIA, VenueTier.CORPORATE_INSTITUTIONAL,
                                        VenueTier.OTHER_AVENUES})
         self.assertEqual(probes[VenueTier.CORPORATE_INSTITUTIONAL], "Regulatory T cells policy forum")
-        for q in main + list(probes.values()):
+        for q in probes.values():
             self.assertNotRegex(q, r"\b20\d\d\b")
 
     def test_probe_counts_when_reworded_but_keeps_phrase(self):
@@ -167,12 +168,12 @@ class TestPhases(DiscoverTestCase):
         api = self.happy_path()
         result = self.run_loop(api)
         self.assertIn("PHASE 1 of 2 -- PROBES", api.requests[0]["opening"])
-        self.assertNotIn("Foxp3 call for abstracts", api.requests[0]["opening"])  # main seeds held back
+        self.assertNotIn("Foxp3 call for abstracts 2027", api.requests[0]["opening"])  # main seeds held back
         self.assertEqual(api.requests[0]["max_uses"]["web_search"], 3)  # exactly one search per probe
         self.assertIn("PHASE 2 of 2 -- MAIN SEARCHES", api.requests[2]["opening"])
         self.assertEqual(api.requests[2]["n_messages"], 1)  # fresh conversation
         self.assertIn("- searched: Regulatory T cells policy forum", api.requests[2]["opening"])  # phase 1 summary
-        self.assertEqual(api.requests[2]["max_uses"]["web_search"], 2)  # what's left of 5
+        self.assertEqual(api.requests[2]["max_uses"]["web_search"], 3)  # what's left of 6
         self.assertEqual([c.name for c in result.candidates], ["ECI 2027"])
         self.assertEqual((result.searches, result.probes_missing), (4, []))
         self.assertTrue(result.stop_reason.startswith("finish: main searches exhausted"))
@@ -190,7 +191,7 @@ class TestPhases(DiscoverTestCase):
 
     def test_main_phase_skipped_when_probes_use_every_search(self):
         api = FakeAPI(probes_turn(), finish("probes done"))
-        result = self.run_loop(api, Limits(searches=3))
+        result = self.run_loop(api, Limits(searches=3))  # all three go to the probes
         self.assertEqual(result.stop_reason, "main phase skipped: no searches left after the probes")
         self.assertEqual(len(api.requests), 2)
 
@@ -403,7 +404,7 @@ class TestLimits(DiscoverTestCase):
         first.usage = NS(input_tokens=60_000, output_tokens=1_000, cache_creation_input_tokens=0, cache_read_input_tokens=0,
                          server_tool_use=NS(web_search_requests=0, web_fetch_requests=0))  # Sonnet 5: about $0.13
         api = FakeAPI(first)
-        result = self.run_loop(api, Limits(searches=0, cost_usd=0.15))
+        result = self.run_loop(api, Limits(searches=0, cost_usd=0.15), model="claude-sonnet-5")
         self.assertEqual(len(api.requests), 1)  # $0.13 spent + a $0.13 turn would pass $0.15: stop now
         self.assertIn("another turn could exceed it", result.stop_reason)
         self.assertLess(result.cost, 0.15)
@@ -415,7 +416,7 @@ class TestLimits(DiscoverTestCase):
         first.usage = NS(input_tokens=5_000, output_tokens=10_000, cache_creation_input_tokens=0, cache_read_input_tokens=0,
                          server_tool_use=NS(web_search_requests=0, web_fetch_requests=0))  # Sonnet 5: about $0.11
         api = FakeAPI(first, finish())
-        result = self.run_loop(api, Limits(searches=0, fetches=0, cost_usd=0.15))
+        result = self.run_loop(api, Limits(searches=0, fetches=0, cost_usd=0.15), model="claude-sonnet-5")
         self.assertEqual(len(api.requests), 2)
         self.assertTrue(result.stop_reason.startswith("finish:"))
 
@@ -424,7 +425,7 @@ class TestLimits(DiscoverTestCase):
         first.usage = NS(input_tokens=5_000, output_tokens=10_000, cache_creation_input_tokens=0, cache_read_input_tokens=0,
                          server_tool_use=NS(web_search_requests=0, web_fetch_requests=0))
         api = FakeAPI(first, finish())
-        result = self.run_loop(api, Limits(searches=2, fetches=0, cost_usd=0.15, **SINGLE_PHASE))
+        result = self.run_loop(api, Limits(searches=2, fetches=0, cost_usd=0.15, **SINGLE_PHASE), model="claude-sonnet-5")
         self.assertEqual(len(api.requests), 1)  # 2 searches still allowed: ~$0.07 more could pass $0.15
         self.assertIn("2 searches and 0 fetches left", result.stop_reason)
 
