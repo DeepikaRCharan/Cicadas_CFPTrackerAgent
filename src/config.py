@@ -67,6 +67,14 @@ DISCOVERY_FETCH_MAX_CONTENT_TOKENS = 5000
 # API's usage report). Leaves room under the $0.25-per-profile ceiling for
 # the hand-off calls that follow.
 DISCOVERY_MAX_LOOP_COST_USD = 0.18
+# For projecting the next turn's cost from the budget actually left (see
+# discover._project_next_turn): tokens one search's results add (measured
+# about 9.5k on the basic tool), a turn's output, and the most searches and
+# fetches one turn has been seen to make (live runs: up to 3 and 2).
+DISCOVERY_SEARCH_RESULT_TOKENS_EST = 10_000
+DISCOVERY_TURN_OUTPUT_TOKENS_EST = 1_000
+DISCOVERY_SEARCHES_PER_TURN_EST = 3
+DISCOVERY_FETCHES_PER_TURN_EST = 2
 
 # Search vocabulary per bucket (brief, Workflow > step 2). Main searches pair
 # the paper's topics with its own bucket(s)' phrases; probes use the first

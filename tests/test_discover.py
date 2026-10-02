@@ -408,6 +408,26 @@ class TestLimits(DiscoverTestCase):
         self.assertIn("another turn could exceed it", result.stop_reason)
         self.assertLess(result.cost, 0.15)
 
+    def test_projection_uses_budget_left_not_largest_turn(self):
+        # one expensive turn (big output), but no searches or fetches left and a small
+        # context: the next turn is cheap, so the loop carries on
+        first = response(tool("record_result", url="u", verdict="stale", reason="r"))
+        first.usage = NS(input_tokens=5_000, output_tokens=10_000, cache_creation_input_tokens=0, cache_read_input_tokens=0,
+                         server_tool_use=NS(web_search_requests=0, web_fetch_requests=0))  # Sonnet 5: about $0.11
+        api = FakeAPI(first, finish())
+        result = self.run_loop(api, Limits(searches=0, fetches=0, cost_usd=0.15))
+        self.assertEqual(len(api.requests), 2)
+        self.assertTrue(result.stop_reason.startswith("finish:"))
+
+    def test_projection_counts_searches_still_allowed(self):
+        first = response(tool("record_result", url="u", verdict="stale", reason="r"))
+        first.usage = NS(input_tokens=5_000, output_tokens=10_000, cache_creation_input_tokens=0, cache_read_input_tokens=0,
+                         server_tool_use=NS(web_search_requests=0, web_fetch_requests=0))
+        api = FakeAPI(first, finish())
+        result = self.run_loop(api, Limits(searches=2, fetches=0, cost_usd=0.15, **SINGLE_PHASE))
+        self.assertEqual(len(api.requests), 1)  # 2 searches still allowed: ~$0.07 more could pass $0.15
+        self.assertIn("2 searches and 0 fetches left", result.stop_reason)
+
     def test_turn_limit_stops_cleanly(self):
         api = FakeAPI(*[response(tool("record_result", url=f"u{i}", verdict="stale", reason="r")) for i in range(3)])
         result = self.run_loop(api, Limits(turns=3, searches=0))

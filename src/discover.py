@@ -51,6 +51,10 @@ from src.config import (
     DISCOVERY_MAX_SEARCHES,
     DISCOVERY_MAX_TURNS,
     DISCOVERY_PROBE_RESERVE,
+    DISCOVERY_FETCHES_PER_TURN_EST,
+    DISCOVERY_SEARCH_RESULT_TOKENS_EST,
+    DISCOVERY_SEARCHES_PER_TURN_EST,
+    DISCOVERY_TURN_OUTPUT_TOKENS_EST,
     MODEL_DISCOVERY,
     WEB_TOOL_TYPES,
 )
@@ -431,12 +435,16 @@ class _State:
     candidates: list[Candidate] = field(default_factory=list)
     cost: float = 0.0
     max_turn_cost: float = 0.0
+    # Tokens in the current conversation's prompt (everything written to it
+    # so far); what the next turn re-reads from the cache.
+    context_tokens: int = 0
     finished: str | None = None
     finish_pushed_back: bool = False
     limit_logged: set[str] = field(default_factory=set)
 
     def start_phase(self, phase: str, search_cap: int) -> None:
         self.phase, self.phase_search_cap, self.phase_searches = phase, search_cap, 0
+        self.context_tokens = 0  # each phase is a fresh conversation
         self.finished, self.finish_pushed_back = None, False
         self.new_exchange()
 
@@ -551,6 +559,25 @@ def _count_usage(state: _State, response) -> None:
         )
         state.cost += turn_cost
         state.max_turn_cost = max(state.max_turn_cost, turn_cost)
+        state.context_tokens += (getattr(usage, "input_tokens", 0) or 0) + (getattr(usage, "cache_creation_input_tokens", 0) or 0)
+
+
+def _project_next_turn(state: _State) -> float:
+    """Plausible cost of the next turn, from the budget actually left: the
+    searches and fetches it could still make (capped at the most one turn has
+    been seen to make), one cached re-read of the conversation per server
+    pass (1 + each of those), their results written to the cache, a turn's
+    output, and the search fees. With no searches left, the projection has
+    no search cost at all."""
+    from src.llm import usage_cost
+
+    searches = min(state.searches_left(), DISCOVERY_SEARCHES_PER_TURN_EST)
+    fetches = min(state.fetches_left(), DISCOVERY_FETCHES_PER_TURN_EST)
+    passes = 1 + searches + fetches
+    context = max(state.context_tokens, 5_000)  # the opening alone is a few thousand tokens
+    new_tokens = searches * DISCOVERY_SEARCH_RESULT_TOKENS_EST + fetches * DISCOVERY_FETCH_MAX_CONTENT_TOKENS + 2_000
+    return usage_cost(state.model, 0, DISCOVERY_TURN_OUTPUT_TOKENS_EST, cache_write_tokens=new_tokens,
+                      cache_read_tokens=passes * context, searches=searches)
 
 
 def _log_limits(state: _State, trace: Trace) -> None:
@@ -696,9 +723,11 @@ def _run_phase(state: _State, handlers: _Handlers, trace: Trace, call, opening: 
     while True:
         if state.turns >= limits.turns:
             return f"LIMIT: turn limit ({limits.turns}) reached"
-        if state.cost + state.max_turn_cost > limits.cost_usd:
+        projected = _project_next_turn(state)
+        if state.cost + projected > limits.cost_usd:
             return (f"LIMIT: loop cost limit (${limits.cost_usd:.2f}) -- another turn could exceed it "
-                    f"(spent ${state.cost:.3f}; largest turn so far ${state.max_turn_cost:.3f})")
+                    f"(spent ${state.cost:.3f}; next turn projected ${projected:.3f} with "
+                    f"{state.searches_left()} searches and {state.fetches_left()} fetches left)")
         # Automatic prompt caching: each turn resends the whole conversation,
         # so the cached prefix is read back at a tenth of the input price.
         response = call(model=state.model, system=SYSTEM_PROMPT, messages=messages,
