@@ -470,6 +470,10 @@ class ConferenceEntry(StrictModel):
     )
     name: str
     url: str
+    dates_url: str | None = Field(
+        None,
+        description="The venue's separate 'important dates' page, when the deadline is stated there rather than on the call page. Re-fetched alongside url on every re-check.",
+    )
     first_seen: datetime
     last_checked: datetime
     extraction: Extraction

@@ -364,6 +364,50 @@ def _score_events(match: ProfileMatch, extraction: Extraction, now: datetime.dat
         _log(match, NotificationReason.TIER_ALERT, extraction, now, logged)
 
 
+@dataclass
+class VenueLookup:
+    """Where a (name, year, url) lands under the identity rules, without
+    changing anything. `entry` is the matching tracked venue (or, for a
+    conflict, the one it collides with)."""
+
+    conference_id: str
+    entry: ConferenceEntry | None
+    conflict: IdentityConflictReason | None = None
+
+
+def lookup_venue(tracker: TrackerFile, name: str, year: int | None, url: str) -> VenueLookup:
+    """The identity rules (brief, Rules > Identity), read-only: tracked only
+    when id and normalized URL both agree; same id/different URL, or same
+    URL and year/different name, is a conflict; same URL with a different
+    year is a new venue."""
+    candidate_id = make_id(name, year)
+    candidate_url = normalize_url(url)
+    entry = next((c for c in tracker.conferences if c.id == candidate_id), None)
+    if entry is not None:
+        if normalize_url(entry.url) != candidate_url:
+            return VenueLookup(candidate_id, entry, IdentityConflictReason.SAME_ID_DIFFERENT_URL)
+        return VenueLookup(candidate_id, entry)
+    clash = next(
+        (c for c in tracker.conferences if normalize_url(c.url) == candidate_url and id_year(c.id) == year),
+        None,
+    )
+    if clash is not None:
+        return VenueLookup(candidate_id, clash, IdentityConflictReason.SAME_URL_SAME_YEAR_DIFFERENT_NAME)
+    return VenueLookup(candidate_id, None)
+
+
+def flag_conflict(
+    tracker: TrackerFile, *, name: str, year: int | None, url: str, profile_id: str, now: datetime.datetime
+) -> UpsertResult:
+    """Record an identity conflict found before any extraction was done
+    (discovery checks identity first, so no model calls are spent on a
+    candidate that would only be flagged)."""
+    found = lookup_venue(tracker, name, year, url)
+    if found.conflict is None:
+        raise TrackerError(f"{found.conference_id!r} at {url} is not an identity conflict")
+    return _flag(tracker, found.conflict, found.conference_id, name, url, found.entry, profile_id, now)
+
+
 def upsert_venue(
     tracker: TrackerFile,
     *,
@@ -376,6 +420,7 @@ def upsert_venue(
     now: datetime.datetime,
     fit_by_tier: dict[VenueTier, TierFit] | None = None,
     decisions: dict[str, ResearcherDecision] | None = None,
+    dates_url: str | None = None,
 ) -> UpsertResult:
     """Merge one found or re-checked venue into the tracker, for one profile.
 
@@ -395,35 +440,19 @@ def upsert_venue(
     if profile_id not in tracker.profiles:
         raise TrackerError(f"profile {profile_id!r} has no classification yet -- record_paper_classification first")
 
-    candidate_id = make_id(name, year)
-    candidate_url = normalize_url(url)
+    found = lookup_venue(tracker, name, year, url)
+    candidate_id = found.conference_id
     logged: list[NotificationReason] = []
-
-    entry = next((c for c in tracker.conferences if c.id == candidate_id), None)
-    if entry is not None and normalize_url(entry.url) != candidate_url:
-        return _flag(tracker, IdentityConflictReason.SAME_ID_DIFFERENT_URL, candidate_id, name, url, entry, profile_id, now)
-    if entry is None:
-        same_url_same_year = next(
-            (c for c in tracker.conferences if normalize_url(c.url) == candidate_url and id_year(c.id) == year),
-            None,
-        )
-        if same_url_same_year is not None:
-            return _flag(
-                tracker,
-                IdentityConflictReason.SAME_URL_SAME_YEAR_DIFFERENT_NAME,
-                candidate_id,
-                name,
-                url,
-                same_url_same_year,
-                profile_id,
-                now,
-            )
+    if found.conflict is not None:
+        return _flag(tracker, found.conflict, candidate_id, name, url, found.entry, profile_id, now)
+    entry = found.entry
 
     if entry is None:
         if not isinstance(extraction, Extraction):
             raise TrackerError(f"new venue {candidate_id!r} needs a full Extraction including venue_tier")
         entry = ConferenceEntry(
-            id=candidate_id, name=name, url=url, first_seen=now, last_checked=now, extraction=extraction
+            id=candidate_id, name=name, url=url, dates_url=dates_url,
+            first_seen=now, last_checked=now, extraction=extraction,
         )
         tracker.conferences.append(entry)
         status = "created"
@@ -440,6 +469,8 @@ def upsert_venue(
             )
         entry.extraction = new
         entry.last_checked = now
+        if dates_url is not None:
+            entry.dates_url = dates_url
 
         opened = old.call_status != CallStatus.OPEN and new.call_status == CallStatus.OPEN
         deadline_changed = new.deadline is not None and (
@@ -525,6 +556,12 @@ def mark_sent(tracker: TrackerFile, receipt: ReportReceipt, sent_on: datetime.da
 
 
 # --- Selection rules shared by the digest and the daily watcher --------------
+
+
+def is_open(match: ProfileMatch) -> bool:
+    """pending or applying: still re-checked every run (brief, Workflow >
+    step 3). Closed matches are history."""
+    return match.decision in (DecisionState.PENDING, DecisionState.APPLYING)
 
 
 def above_new_fit(match: ProfileMatch) -> bool:

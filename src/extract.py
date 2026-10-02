@@ -295,13 +295,29 @@ def extract_facts(url: str, today: datetime.date | None = None) -> ExtractionFac
     a future stated opening date is not_yet_open, a passed one is open -- is
     resolved against a date extraction actually hands the model, not one it
     has to assume."""
+    return extract_facts_from_text(url, fetch_text([url]), today)
+
+
+def fetch_text(urls: list[str]) -> str:
+    """Fetch each URL and return their plain text. Several pages (a call
+    page plus its "important dates" page) are joined under per-page headers
+    so extraction can see the deadline wherever it was stated. Raises
+    RuntimeError on any fetch failure, like fetch_page."""
+    parts = []
+    for url in urls:
+        text = html_to_text(fetch_page(url))
+        parts.append(text if len(urls) == 1 else f"=== Page: {url} ===\n{text}")
+    page_text = "\n\n".join(parts)
+    page_text_log = _write_log("page_text", "txt", page_text)
+    print(f"[extract] fetched {', '.join(urls)} -> page text logged to {page_text_log}")
+    return page_text
+
+
+def extract_facts_from_text(url: str, page_text: str, today: datetime.date | None = None) -> ExtractionFacts:
+    """extract_facts on already-fetched text (see fetch_text), so discovery
+    can fetch a page once and share it with classify and judge-fit."""
     if today is None:
         today = datetime.datetime.now(datetime.timezone.utc).date()
-
-    html = fetch_page(url)
-    page_text = html_to_text(html)
-    page_text_log = _write_log("page_text", "txt", page_text)
-    print(f"[extract] fetched {url} -> page text logged to {page_text_log}")
 
     response = call_llm(
         model=MODEL_EXTRACTION,
