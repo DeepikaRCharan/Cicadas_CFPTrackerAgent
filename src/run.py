@@ -34,7 +34,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from src.config import DECISIONS_PATH, MODEL_DISCOVERY, TRACES_DIR, TRACKER_PATH, WEB_TOOL_TYPES
-from src.discover import Candidate, Limits, Trace, discover
+from src.discover import Candidate, Limits, Trace, discover, page_key
 from src.profile_schema import Profile, load_live_profiles
 from src.tracker import (
     DecisionsError,
@@ -44,7 +44,6 @@ from src.tracker import (
     load_decisions,
     load_tracker,
     lookup_venue,
-    normalize_url,
     record_paper_classification,
     save_tracker,
     sync_decisions,
@@ -103,7 +102,7 @@ class Run:
         try:
             return self.extract.fetch_text(urls)
         except RuntimeError as exc:
-            copies = [loop_text.get(normalize_url(u)) for u in urls]
+            copies = [loop_text.get(page_key(u)) for u in urls]
             if copies[0] is None:
                 raise
             kept = [(u, t) for u, t in zip(urls, copies) if t is not None]
@@ -118,7 +117,8 @@ class Run:
         label = f"{candidate.name} ({candidate.year if candidate.year is not None else 'rolling'})"
         trace.add(f"### {label}", f"- {candidate.call_page_url}"
                   + (f" + dates page {candidate.dates_page_url}" if candidate.dates_page_url else ""),
-                  f"- deadline evidence: {candidate.deadline_evidence}")
+                  f"- deadline evidence: {candidate.deadline_evidence}"
+                  + (f' -- "{candidate.deadline_quote}"' if candidate.deadline_quote else ""))
         try:
             found = lookup_venue(self.tracker, candidate.name, candidate.year, candidate.call_page_url)
             if found.conflict is not None:

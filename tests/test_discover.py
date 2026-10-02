@@ -78,7 +78,8 @@ def finish(reason="done", tid="fin"):
 
 
 ECI = dict(name="ECI 2027", year=2027, call_page_url="https://eci2027.org/call-for-abstracts/",
-           dates_page_url=None, deadline_evidence="on_call_page", reason="live call for immunology abstracts")
+           dates_page_url=None, deadline_evidence="on_call_page", deadline_quote="Submission deadline: 31 March 2027",
+           reason="live call for immunology abstracts")
 
 
 def probes_turn():
@@ -262,6 +263,49 @@ class TestDecisions(DiscoverTestCase):
         self.assertIn("deadline_evidence is on_dates_page but https://eci2027.org/dates has not been fetched",
                       self.trace_text())
         self.assertEqual(result.candidates, [])
+
+    def test_read_check_ignores_url_case(self):
+        fetched = "https://www.keystonesymposia.org/conferences/meeting/j22027"
+        cited = dict(ECI, name="T Cells 2027", call_page_url="https://www.keystonesymposia.org/conferences/meeting/J22027")
+        api = FakeAPI(response(fetch(fetched),
+                               tool("record_result", url=cited["call_page_url"], verdict="live_cfp", reason="open"),
+                               tool("accept_candidate", "t2", **cited)),
+                      finish())
+        result = self.run_loop(api, Limits(searches=0))
+        self.assertEqual([c.name for c in result.candidates], ["T Cells 2027"])
+        self.assertNotIn("REFUSED", self.trace_text())
+
+    def test_deadline_quote_must_appear_on_a_read_page(self):
+        api = FakeAPI(response(fetch(ECI["call_page_url"]),
+                               tool("accept_candidate", **dict(ECI, deadline_quote="Deadline: 15 January 2027"))),
+                      finish())
+        result = self.run_loop(api, Limits(searches=0))
+        self.assertEqual(result.candidates, [])
+        self.assertIn("does not appear on https://eci2027.org/call-for-abstracts/", self.trace_text())
+
+    def test_deadline_quote_match_ignores_whitespace_and_case(self):
+        api = FakeAPI(response(fetch(ECI["call_page_url"]),
+                               tool("accept_candidate", **dict(ECI, deadline_quote="  SUBMISSION   deadline:\n31 march 2027 "))),
+                      finish())
+        result = self.run_loop(api, Limits(searches=0))
+        self.assertEqual(len(result.candidates), 1)
+        self.assertEqual(result.candidates[0].deadline_quote.split()[0], "SUBMISSION")
+
+    def test_deadline_quote_may_come_from_the_dates_page(self):
+        dates = "https://eci2027.org/dates"
+        api = FakeAPI(response(fetch(ECI["call_page_url"], "f1", page="Call for abstracts is open now. " * 20),
+                               fetch(dates, "f2"),
+                               tool("accept_candidate", **dict(ECI, dates_page_url=dates, deadline_evidence="on_dates_page"))),
+                      finish())
+        result = self.run_loop(api, Limits(searches=0))
+        self.assertEqual(len(result.candidates), 1)
+
+    def test_empty_deadline_quote_refused(self):
+        api = FakeAPI(response(fetch(ECI["call_page_url"]), tool("accept_candidate", **dict(ECI, deadline_quote=""))),
+                      finish())
+        result = self.run_loop(api, Limits(searches=0))
+        self.assertEqual(result.candidates, [])
+        self.assertIn("deadline_quote is empty", self.trace_text())
 
     def test_aggregator_refused(self):
         api = FakeAPI(

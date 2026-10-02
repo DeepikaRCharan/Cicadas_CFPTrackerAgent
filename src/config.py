@@ -66,7 +66,7 @@ DISCOVERY_FETCH_MAX_CONTENT_TOKENS = 5000
 # Estimated spend at which the loop stops (checked between turns, from the
 # API's usage report). Leaves room under the $0.25-per-profile ceiling for
 # the hand-off calls that follow.
-DISCOVERY_MAX_LOOP_COST_USD = 0.15
+DISCOVERY_MAX_LOOP_COST_USD = 0.18
 
 # Search vocabulary per bucket (brief, Workflow > step 2). Main searches pair
 # the paper's topics with its own bucket(s)' phrases; probes use the first

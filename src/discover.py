@@ -93,6 +93,7 @@ class Candidate:
     deadline_evidence: str
     reason: str
     conflict: bool = False  # identity conflict: flagged by run.py, no model calls spent
+    deadline_quote: str = ""
 
 
 @dataclass
@@ -104,7 +105,7 @@ class DiscoveryResult:
     fetches: int
     probes_missing: list[VenueTier]
     cost: float = 0.0
-    # normalized URL -> readable text the loop fetched; the hand-off's
+    # page_key(url) -> readable text the loop fetched; the hand-off's
     # fallback when its own fetch is blocked
     fetched_text: dict[str, str] = field(default_factory=dict)
 
@@ -152,6 +153,22 @@ def is_blocked(url: str) -> bool:
     return _on_domain(url, BLOCKED_DOMAINS)
 
 
+def page_key(url: str) -> str:
+    """Key for "has this page been read?": the normalized URL, ignoring case.
+    Only for that check -- tracker identity keeps paths case-sensitive."""
+    return normalize_url(url).lower()
+
+
+def _squash(text: str) -> str:
+    return " ".join(text.split()).lower()
+
+
+def quote_found(quote: str, page_text: str) -> bool:
+    """Whether `quote` appears in `page_text`, ignoring whitespace and case."""
+    q = _squash(quote)
+    return bool(q) and q in _squash(page_text)
+
+
 def fetched_page(result_content) -> tuple[bool, str | None, int]:
     """(readable, text, characters) for a web_fetch result. A PDF counts as
     readable (the model reads it) but has no plain text to keep."""
@@ -195,6 +212,11 @@ call page (search for it or fetch it) before accepting.
 - accept_candidate checks the tracker itself and refuses venues already \
 tracked for this paper, so accept a live call directly. Use check_tracker \
 only to decide whether a lead is worth fetching.
+- accept_candidate needs deadline_quote: the exact words, copied from the \
+call page or dates page you read, that state the deadline -- or, for a \
+rolling call, that say submissions are rolling; or, for "not_found", that \
+say the call is open. The code checks the quote against those pages and \
+refuses the candidate if it isn't there.
 - A call page without a deadline: look for the venue's "important dates" or \
 "key dates" page and pass it as dates_page_url. Use deadline_evidence \
 "rolling" only when the page says submissions are accepted on a rolling or \
@@ -255,9 +277,12 @@ CLIENT_TOOLS = [
                 "call_page_url": {"type": "string", "description": "The venue's own call page -- never an aggregator listing."},
                 "dates_page_url": {"type": ["string", "null"], "description": "Separate 'important dates' page, when the deadline is stated there."},
                 "deadline_evidence": {"type": "string", "enum": DEADLINE_EVIDENCE},
+                "deadline_quote": {"type": "string", "description": (
+                    "Exact words copied from the call page or dates page you read: the deadline statement (or the "
+                    "rolling-submissions statement, or for not_found the statement that the call is open). Checked by code.")},
                 "reason": {"type": "string", "description": "Why this is a live call worth judging for this paper."},
             },
-            "required": ["name", "year", "call_page_url", "dates_page_url", "deadline_evidence", "reason"],
+            "required": ["name", "year", "call_page_url", "dates_page_url", "deadline_evidence", "deadline_quote", "reason"],
         },
     },
     {
@@ -425,7 +450,7 @@ class _State:
         return max(0, self.limits.fetches - self.fetches)
 
     def was_read(self, url: str) -> bool:
-        return normalize_url(url) in self.fetched
+        return page_key(url) in self.fetched
 
     def missing_probes(self) -> list[VenueTier]:
         return [b for b in self.probes if not probe_covered(b, self.queries)]
@@ -499,7 +524,7 @@ def _count_usage(state: _State, response) -> None:
             ok_fetches += 1
             readable, text, _ = fetched_page(result.content)
             for url in {u for u in (block.input.get("url"), getattr(result.content, "url", None)) if u}:
-                key = normalize_url(url)
+                key = page_key(url)
                 if readable:
                     state.fetched.add(key)
                     state.unreadable.discard(key)
@@ -562,7 +587,7 @@ class _Handlers:
         }
 
     def _not_read(self, url: str) -> str:
-        if normalize_url(url) in self.state.unreadable:
+        if page_key(url) in self.state.unreadable:
             return f"{url} was fetched but came back with no readable text -- it can't be evidence"
         return f"{url} has not been fetched in this run"
 
@@ -630,12 +655,23 @@ class _Handlers:
             return f"not accepted: the call page {self._not_read(url)} -- fetch a readable copy first", True
         if evidence == "on_dates_page" and not state.was_read(dates_url):
             return f"not accepted: deadline_evidence is on_dates_page but {self._not_read(dates_url)}", True
+        quote = (args.get("deadline_quote") or "").strip()
+        pages = [u for u in (url, dates_url) if u]
+        texts = [state.fetched_text.get(page_key(u)) for u in pages]
+        if not quote:
+            return "not accepted: deadline_quote is empty -- copy the deadline wording from the page you read", True
+        if not any(t and quote_found(quote, t) for t in texts):
+            where = " or ".join(pages)
+            if not any(texts):
+                return f"not accepted: no text was kept for {where} (e.g. a PDF), so the quote can't be checked", True
+            return (f"not accepted: deadline_quote {quote!r} does not appear on {where} -- copy the exact "
+                    "wording from the page, or don't accept it"), True
         candidate_id = lookup_venue(self.tracker, name, year, url).conference_id
         if any(lookup_venue(self.tracker, c.name, c.year, c.call_page_url).conference_id == candidate_id
                for c in state.candidates):
             return f"{candidate_id!r} was already accepted this run", True
         state.candidates.append(Candidate(name, year, url, dates_url, evidence, args.get("reason", ""),
-                                          conflict=status == "conflict"))
+                                          conflict=status == "conflict", deadline_quote=quote))
         tail = " -- candidate limit now reached, discovery will end" if len(state.candidates) >= state.limits.candidates else ""
         return f"accepted as {candidate_id!r} ({status}){tail}", False
 

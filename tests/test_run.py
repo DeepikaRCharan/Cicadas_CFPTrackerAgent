@@ -148,7 +148,7 @@ class TestHandOff(RunTestCase):
         url = "https://broken.example/special-issue"
         run, fakes = self.make_run({url: facts()})
         self.quiet(run.hand_off, self.profile, Candidate("Special Issue 2026", 2026, url, None, "on_call_page", "r"),
-                   self.trace, {url.replace("https://", ""): "loop copy " * 50})
+                   self.trace, {url.replace("https://", "").lower(): "loop copy " * 50})
         self.assertEqual([c[0] for c in fakes.calls], ["fetch", "extract", "classify", "judge"])
         self.assertEqual(run.failures, [])
         self.assertIn("using the discovery loop's fetched copy", "\n".join(self.trace.lines))
