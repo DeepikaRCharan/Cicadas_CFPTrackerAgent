@@ -183,7 +183,7 @@ class TestPhases(DiscoverTestCase):
         self.assertTrue(result.stop_reason.startswith("finish: main searches exhausted"))
         trace = self.trace_text()
         for snippet in ("## Phase 1: probes", "## Phase 2: main searches", "web_search** `Foxp3 call for abstracts 2027`",
-                        '- reason (before the call): "Main: Foxp3 abstracts."', "code: new: not tracked",
+                        'Reason stated before calls #6–#7: "Main: Foxp3 abstracts."', "code: new: not tracked",
                         "accept_candidate** {", "- reason (in the call): live call for immunology abstracts", "probes phase finished: all probes judged"):
             self.assertIn(snippet, trace)
 
@@ -498,17 +498,19 @@ class TestTraceFile(DiscoverTestCase):
 
 
 class TestTraceLayout(DiscoverTestCase):
-    """Step 9 trace layout: numbered calls, the model's own stated reason per
-    call, one-line result summaries, <details> lists only outside the terminal."""
+    """Step 9 trace layout: numbered calls in order, the model's own stated
+    reason (once over a group when one line preceded several calls), one-line
+    result summaries, <details> lists only outside the terminal."""
 
     def run_eci(self):
         api = FakeAPI(
-            response(text("Looking for immunology congress calls.\nSearching the ECI call first."),
+            response(text("Looking for immunology congress calls.\nSearching the **ECI call** first."),
                      search("ECI 2027 call for abstracts", results=[("ECI 2027 call for abstracts", ECI["call_page_url"]),
                                                                     ("Some <b>listing</b>", "https://example.org/x")]),
                      search("immunology congress 2027", sid="s2"),
                      text("Fetching the ECI call page to read the deadline."),
                      fetch(ECI["call_page_url"]),
+                     text("**Checking the tracker:**"),
                      tool("check_tracker", "c1", name="ECI 2027", year=2027, url=ECI["call_page_url"])),
             response(text("The page shows an open call."),
                      tool("record_result", "r1", url=ECI["call_page_url"], verdict="live_cfp", reason="open, deadline 31 March 2027"),
@@ -518,26 +520,46 @@ class TestTraceLayout(DiscoverTestCase):
             finish("done"))
         self.run_loop(api, Limits(**SINGLE_PHASE))
 
-    def test_reason_is_the_text_just_before_each_call_never_invented(self):
+    def test_one_reason_over_a_group_labelled_with_call_numbers(self):
         self.run_eci()
         lines = self.trace.lines
-        first = lines.index("**#1 web_search** `ECI 2027 call for abstracts`")
-        self.assertEqual(lines[first + 1], '- reason (before the call): "Searching the ECI call first."')
-        second = lines.index("**#2 web_search** `immunology congress 2027`")
-        self.assertEqual(lines[second + 1], "- reason (before the call): (no reason stated before this call)")
-        fetch_line = lines.index(f"**#3 web_fetch** {ECI['call_page_url']}")
-        self.assertEqual(lines[fetch_line + 1], '- reason (before the call): "Fetching the ECI call page to read the deadline."')
+        header = lines.index('Reason stated before calls #1–#2: "Searching the ECI call first."')
+        self.assertEqual(lines[header + 2], "**#1 web_search** `ECI 2027 call for abstracts`")
+        self.assertNotIn("- reason (before the call)", lines[header + 3])  # not repeated per call
+        self.assertIn('Reason stated before calls #5–#6: "The page shows an open call."', lines)
 
-    def test_decision_reasons_labelled_before_and_in_the_call(self):
+    def test_single_call_keeps_its_reason_inline(self):
+        self.run_eci()
+        lines = self.trace.lines
+        i = lines.index(f"**#3 web_fetch** {ECI['call_page_url']}")
+        self.assertEqual(lines[i + 1], '- reason (before the call): "Fetching the ECI call page to read the deadline."')
+        i = next(n for n, line in enumerate(lines) if line.startswith("**#7 accept_candidate**"))
+        self.assertEqual(lines[i + 1], '- reason (before the call): "Accepting ECI 2027."')
+        self.assertEqual(lines[i + 2], "- reason (in the call): live call for immunology abstracts")
+
+    def test_stray_markdown_emphasis_stripped_from_reasons(self):
+        self.run_eci()
+        i = next(n for n, line in enumerate(self.trace.lines) if line.startswith("**#4 check_tracker**"))
+        self.assertEqual(self.trace.lines[i + 1], '- reason (before the call): "Checking the tracker:"')
+        self.assertNotIn('**"', self.turns_text())
+        self.assertNotIn("the **ECI", self.turns_text().split("<details>")[0])
+
+    def test_calls_without_any_text_say_so(self):
+        api = FakeAPI(response(search("q1"), search("q2", sid="s2"), tool("check_tracker", "c1", name="X", year=2027, url="https://x.org")),
+                      response(tool("finish", "f1", reason="done")))
+        self.run_loop(api, Limits(**SINGLE_PHASE))
+        self.assertIn("(no reason stated before calls #1–#3)", self.trace.lines)
+        i = next(n for n, line in enumerate(self.trace.lines) if line.startswith("**#4 finish**"))
+        self.assertEqual(self.trace.lines[i + 1], "- reason (before the call): (no reason stated before this call)")
+
+    def test_decision_reply_lands_under_its_own_call_in_order(self):
         self.run_eci()
         text = self.turns_text()
         self.assertIn('**#5 record_result** {"url": "https://eci2027.org/call-for-abstracts/", "verdict": "live_cfp"}\n'
-                      '- reason (before the call): "The page shows an open call."\n'
-                      "- reason (in the call): open, deadline 31 March 2027", text)
-        self.assertIn('- reason (before the call): (no reason stated before this call)\n'
-                      "- reason (in the call): a listing", text)
-        self.assertIn('- reason (before the call): "Accepting ECI 2027."\n'
-                      "- reason (in the call): live call for immunology abstracts", text)
+                      "- reason (in the call): open, deadline 31 March 2027\n- code: noted", text)
+        self.assertLess(text.index("**#5 record_result**"), text.index("**#6 record_result**"))
+        self.assertLess(text.index("**#6 record_result**"), text.index("**#7 accept_candidate**"))
+        self.assertNotIn("(not handled)", text)
 
     def test_one_line_result_summaries_logged_from_results(self):
         self.run_eci()
@@ -549,7 +571,7 @@ class TestTraceLayout(DiscoverTestCase):
         self.run_eci()
         md, term = self.trace.markdown(), self.trace.terminal()
         self.assertIn("<details><summary>All 2 results</summary>", md)
-        self.assertIn("- Some &lt;b&gt;listing&lt;/b&gt; — https://example.org/x", md)  # escaped inside <details>
+        self.assertIn("- Some &lt;b&gt;listing&lt;/b&gt; — https://example.org/x", md)
         self.assertIn("<details><summary>Model&#x27;s full text this turn</summary>", md)
         for raw in ("<details>", "</details>", "<summary>", "Some <b>listing", "&lt;"):
             self.assertNotIn(raw, term)
@@ -578,15 +600,155 @@ class TestTraceLayout(DiscoverTestCase):
         self.assertEqual(dict(self.trace.tool_calls), {"web_search": 2, "web_fetch": 1, "check_tracker": 1, "record_result": 2,
                                                        "accept_candidate": 1, "finish": 1})
 
-    def test_header_has_paper_bucket_and_cues(self):
+    def test_header_has_paper_bucket_cues_and_probe_caps(self):
         self.run_eci()
         head = self.trace_text().split("## ")[0]
         self.assertIn("Read as: Academic & Practitioner", head)
         self.assertIn("Cues that drove that call:\n- a\n- b\n- c", head)
+        self.assertIn("Probe phase capped at 4 turns, 2 fetches and $0.110 spend; the rest is reserved for the main searches", head)
 
     def test_prompt_asks_for_a_line_before_every_call(self):
         from src.discover import SYSTEM_PROMPT
         self.assertIn("Before each tool call", SYSTEM_PROMPT)
+
+
+def fetch_call(url, sid):
+    """A web_fetch call whose result doesn't come back in the same response."""
+    return NS(type="server_tool_use", id=sid, name="web_fetch", input={"url": url})
+
+
+def fetch_result(url, sid, page=PAGE_TEXT):
+    return NS(type="web_fetch_tool_result", tool_use_id=sid,
+              content=NS(type="web_fetch_result", url=url, content=NS(title="Call for abstracts", source=NS(type="text", data=page))))
+
+
+def search_call(query, sid):
+    return NS(type="server_tool_use", id=sid, name="web_search", input={"query": query})
+
+
+def search_result(sid, results=(("ECI 2027 call for abstracts", "https://eci2027.org/call-for-abstracts/"),)):
+    return NS(type="web_search_tool_result", tool_use_id=sid,
+              content=[NS(type="web_search_result", title=t, url=u, page_age=None) for t, u in results])
+
+
+class TestResultsInTheNextResponse(DiscoverTestCase):
+    """Fix #1: a search or fetch made just before a decision-tool call gets
+    its result at the start of the next response."""
+
+    def aeet_case(self):
+        url = ECI["call_page_url"]
+        return FakeAPI(
+            response(search("q"), text("Fetching the call page."), fetch_call(url, "late"),
+                     tool("record_result", "r1", url=url, verdict="live_cfp", reason="looks open"), fetches=0),
+            response(fetch_result(url, "late"), text("Read it; accepting."), tool("accept_candidate", "a1", **ECI), fetches=1),
+            finish("done"))
+
+    def test_late_fetch_result_counts_as_read_so_accept_succeeds(self):
+        result = self.run_loop(self.aeet_case(), Limits(**SINGLE_PHASE))
+        self.assertEqual([c.name for c in result.candidates], ["ECI 2027"])
+        self.assertEqual(result.fetched_text.get("eci2027.org/call-for-abstracts"), PAGE_TEXT)
+        text = self.turns_text()
+        # before the result arrived, live_cfp was rightly refused (not read yet)
+        self.assertIn("REFUSED by code: live_cfp refused", text)
+        self.assertIn("- code: accepted as 'eci-2027' (new)", text)
+
+    def test_trace_fills_the_result_in_under_the_original_call(self):
+        self.run_loop(self.aeet_case(), Limits(**SINGLE_PHASE))
+        lines = self.trace.lines
+        i = lines.index(f"**#2 web_fetch** {ECI['call_page_url']}")
+        self.assertEqual(lines[i + 1], "- result: readable, 559 characters — Call for abstracts — "
+                                       "https://eci2027.org/call-for-abstracts/ (arrived with the next response)")
+        self.assertNotIn("waiting for the next one", self.trace_text())
+
+    def test_late_search_result_credits_the_probe_and_shows_results(self):
+        api = FakeAPI(
+            response(search_call(PROBE_QUERIES[0], "p0"), tool("record_result", "r0", url="u", verdict="stale", reason="r"),
+                     searches=0),
+            response(search_result("p0"), *[search(q, sid=f"p{i}") for i, q in enumerate(PROBE_QUERIES[1:], 1)],
+                     tool("finish", "f1", reason="probes done"), searches=3),
+            finish("main done"))
+        result = self.run_loop(api)
+        self.assertEqual(result.probes_missing, [])
+        lines = self.trace.lines
+        i = lines.index(f"**#1 web_search** `{PROBE_QUERIES[0]}`")
+        self.assertTrue(lines[i + 1].startswith("- result: 1 result(s); top: ECI 2027"), lines[i + 1])
+        self.assertTrue(lines[i + 1].endswith("(arrived with the next response)"))
+        self.assertIn("<details><summary>All 1 results</summary>", lines[i + 2:i + 5])
+
+    def test_result_that_never_arrives_says_so_at_phase_end(self):
+        api = FakeAPI(response(fetch_call(ECI["call_page_url"], "lost"), tool("finish", "f1", reason="done"), fetches=0))
+        self.run_loop(api, Limits(**SINGLE_PHASE))
+        self.assertIn("- result: (no result returned before this phase ended)", self.trace.lines)
+        self.assertNotIn("waiting for the next one", self.trace_text())
+
+
+def costly(resp, input_tokens):
+    """Make a scripted response cost more: input tokens at list price."""
+    resp.usage.input_tokens = input_tokens
+    return resp
+
+
+class TestMainPhaseReserve(DiscoverTestCase):
+    """The probe phase has its own caps, so it can never starve the main phase."""
+
+    def test_probe_phase_ends_at_its_turn_cap_and_main_still_runs(self):
+        stuck = [response(tool("record_result", f"r{i}", url=f"https://x{i}.org", verdict="stale", reason="old"))
+                 for i in range(4)]
+        api = FakeAPI(probes_turn(), *stuck[:3], finish("main done"))
+        self.run_loop(api, Limits(probe_turns=4))
+        self.assertIn("PHASE 2 of 2 -- MAIN SEARCHES", api.requests[4]["opening"])
+        self.assertIn("probe phase budget reached (4 turns) -- the main searches keep their reserved budget", self.trace_text())
+
+    def test_probe_phase_fetches_capped(self):
+        api = FakeAPI(probes_turn(), finish("probes done"), finish("main done"))
+        self.run_loop(api, Limits(fetches=4, probe_fetches=2))
+        self.assertEqual(api.requests[0]["max_uses"]["web_fetch"], 2)
+        self.assertEqual(api.requests[2]["max_uses"]["web_fetch"], 4)  # main: everything left
+
+    def test_expensive_probes_stop_at_their_share_and_main_gets_a_turn(self):
+        # a probe turn costing about $0.08 leaves no room under the $0.11 share for another
+        api = FakeAPI(costly(probes_turn(), 50_000),
+                      costly(response(tool("record_result", "r1", url="https://y.org", verdict="stale", reason="old")), 50_000))
+        result = self.run_loop(api)
+        self.assertIn("probe phase budget reached ($0.110 spend", self.trace_text())
+        self.assertEqual(["PHASE 2 of 2" in r["opening"] for r in api.requests], [False, True])
+        self.assertTrue(result.stop_reason.startswith("LIMIT: loop cost limit"), result.stop_reason)
+
+    def test_main_phase_never_skipped_for_cost_after_probes(self):
+        # one probe turn far over its projection: main still gets its first turn
+        api = FakeAPI(costly(probes_turn(), 100_000), finish("main done"))
+        result = self.run_loop(api)
+        self.assertIn("PHASE 2 of 2", api.requests[1]["opening"])
+        self.assertIn("main phase's first turn runs despite the loop cost limit", self.trace_text())
+        self.assertTrue(result.stop_reason.startswith("finish: main done"))
+
+    def test_main_phase_cost_limit_still_applies_after_its_first_turn(self):
+        api = FakeAPI(costly(probes_turn(), 100_000),
+                      costly(response(search("Foxp3 call for abstracts 2027", sid="m1"),
+                                      tool("record_result", "r1", url="https://y.org", verdict="stale", reason="old")), 100_000))
+        result = self.run_loop(api)
+        self.assertTrue(result.stop_reason.startswith("LIMIT: loop cost limit"), result.stop_reason)
+        self.assertEqual(len(api.requests), 2)
+
+
+class TestProbeNearVariants(unittest.TestCase):
+    def test_dropped_filler_word_counts(self):
+        self.assertTrue(probe_covered(VenueTier.OTHER_AVENUES, ["Spatial Ecology open call submissions 2026 2027"]))
+
+    def test_plural_and_order_variants_count(self):
+        self.assertTrue(probe_covered(VenueTier.CORPORATE_INSTITUTIONAL, ["Spatial ecology policy forums 2027"]))
+        self.assertTrue(probe_covered(VenueTier.CORPORATE_INSTITUTIONAL, ["invited submissions spatial ecology"]))
+        self.assertTrue(probe_covered(VenueTier.INDUSTRY_TECHNICAL_MEDIA, ["Treg call for speaker"]))
+        self.assertTrue(probe_covered(VenueTier.INDUSTRY_TECHNICAL_MEDIA, ["Treg calls for presentations"]))
+
+    def test_missing_content_word_does_not_count(self):
+        self.assertFalse(probe_covered(VenueTier.OTHER_AVENUES, ["Spatial Ecology call for submissions"]))  # no "open"
+        self.assertFalse(probe_covered(VenueTier.CORPORATE_INSTITUTIONAL, ["spatial ecology policy"]))
+        self.assertFalse(probe_covered(VenueTier.INDUSTRY_TECHNICAL_MEDIA, ["Treg immunology magazine"]))
+        self.assertFalse(probe_covered(VenueTier.INDUSTRY_TECHNICAL_MEDIA, ["Treg write-ups"]))  # not "write for us"
+
+    def test_main_seed_does_not_credit_a_probe(self):
+        self.assertFalse(probe_covered(VenueTier.OTHER_AVENUES, ["Regulatory T cells call for papers 2026"]))
 
 
 if __name__ == "__main__":

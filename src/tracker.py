@@ -555,6 +555,56 @@ def mark_sent(tracker: TrackerFile, receipt: ReportReceipt, sent_on: datetime.da
         tracker.profiles[profile_id].snapshot_sent = sent_on
 
 
+# --- Call status: decided by code from the deadline ---------------------------
+
+
+def last_submission_day(facts: ExtractionFacts) -> datetime.date | None:
+    """The deadline, or for a month-only deadline the end of that month.
+    None when there is no deadline to count from (rolling, or not found)."""
+    if not facts.has_deadline or facts.deadline is None:
+        return None
+    if facts.deadline_precision is not None and facts.deadline_precision.value == "month":
+        next_month = facts.deadline.replace(day=28) + datetime.timedelta(days=4)
+        return next_month - datetime.timedelta(days=next_month.day)
+    return facts.deadline
+
+
+def deadline_passed(facts: ExtractionFacts, today: datetime.date) -> bool:
+    """Only after the last submission day: the deadline day itself is still
+    open (no deadline time is stored, so it counts as open until it ends)."""
+    last = last_submission_day(facts)
+    return last is not None and today > last
+
+
+def decide_call_status(facts: ExtractionFacts, today: datetime.date) -> tuple[ExtractionFacts, str | None]:
+    """Open or closed is decided here, from the deadline and the run date --
+    not by extraction. A call is closed only after its deadline has passed:
+
+    - deadline passed -> closed, whatever extraction read;
+    - extraction read closed, deadline not passed -> open;
+    - extraction read closed, no deadline to judge by (rolling, or not
+      found) -> unknown;
+    - otherwise extraction's open / not_yet_open / unknown stands (the
+      deadline can't say whether a call has opened yet).
+
+    Returns (facts, note); note says what changed, None when nothing did."""
+    read = facts.call_status
+    if deadline_passed(facts, today):
+        decided = CallStatus.CLOSED
+    elif read == CallStatus.CLOSED:
+        decided = CallStatus.UNKNOWN if last_submission_day(facts) is None else CallStatus.OPEN
+    else:
+        decided = read
+    if decided == read:
+        return facts, None
+    last = last_submission_day(facts)
+    why = (f"its deadline ({facts.deadline_as_stated}) passed on {last.isoformat()}" if decided == CallStatus.CLOSED
+           else f"its deadline ({facts.deadline_as_stated}) has not passed (run date {today.isoformat()})" if last
+           else "there is no deadline to judge it by")
+    return (facts.model_copy(update={"call_status": decided}),
+            f"call status set to {decided.value} by code (extraction read {read.value}): {why}")
+
+
 # --- Selection rules shared by the digest and the daily watcher --------------
 
 

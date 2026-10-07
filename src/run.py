@@ -62,6 +62,7 @@ from src.profile_schema import Profile, load_live_profiles
 from src.tracker import (
     DecisionsError,
     TrackerError,
+    decide_call_status,
     flag_conflict,
     is_open,
     load_decisions,
@@ -191,6 +192,15 @@ class Run:
         record_paper_classification(self.tracker, profile.id, self.classify.classify_paper(profile))
         self.save()
 
+    def call_status(self, facts, trace: Trace, label: str | None = None):
+        """Open/closed by code from the deadline and the run date (brief,
+        Rules > Call status), never extraction's own reading; noted in the
+        trace when it differs."""
+        facts, note = decide_call_status(facts, self.today)
+        if note:
+            trace.add(f"- {f'`{label}`: ' if label else ''}{note}")
+        return facts
+
     def judge(self, profile, facts, page_text, url, venue_tier):
         if not facts.complete:
             return {}
@@ -238,7 +248,8 @@ class Run:
 
             urls = [candidate.call_page_url] + ([candidate.dates_page_url] if candidate.dates_page_url else [])
             page_text = self.page_text(urls, loop_text or {}, trace)
-            facts = self.extract.extract_facts_from_text(candidate.call_page_url, page_text, self.today)
+            facts = self.call_status(self.extract.extract_facts_from_text(candidate.call_page_url, page_text, self.today),
+                                     trace)
             if candidate.deadline_evidence == "not_found" and not facts.has_deadline:
                 # Discovery found no deadline; extraction calls the call rolling.
                 # Two readings disagree on the one fact most likely to misfire a
@@ -294,7 +305,8 @@ class Run:
             try:
                 urls = [conference.url] + ([conference.dates_url] if conference.dates_url else [])
                 page_text = self.extract.fetch_text(urls)
-                facts = self.extract.extract_facts_from_text(conference.url, page_text, self.today)
+                facts = self.call_status(self.extract.extract_facts_from_text(conference.url, page_text, self.today),
+                                         trace, conference.id)
                 was_complete = conference.extraction.complete
                 notes, logged = [], []
                 rescored = False

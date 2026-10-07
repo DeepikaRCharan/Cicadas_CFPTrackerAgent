@@ -63,6 +63,17 @@ DISCOVERY_MAX_SEARCHES = 6  # 3 main + 3 probes
 DISCOVERY_PROBE_RESERVE = 3  # of the searches, kept for one probe per other bucket
 DISCOVERY_MAX_FETCHES = 4  # the model judges from search snippets unless it truly needs the page
 DISCOVERY_MAX_CANDIDATES = 2
+# The probe phase's own caps, so it can never starve the main searches: the
+# main phase is guaranteed the rest of the turns, fetches and loop spend.
+# (Probe searches are already capped by DISCOVERY_PROBE_RESERVE.)
+DISCOVERY_PROBE_MAX_TURNS = 4
+DISCOVERY_PROBE_MAX_FETCHES = 2
+# Half the loop spend ($0.11 of $0.22). The probe phase stops before a turn
+# whose projected cost would take it past its share, so the main phase starts
+# with at most $0.11 spent -- room for its first full turn (projected $0.0905
+# with 3 searches and 2 fetches left: $0.11 + $0.0905 <= $0.22). A smaller
+# share can't fit even the first probe turn's projection.
+DISCOVERY_PROBE_COST_SHARE = 0.5  # of DISCOVERY_MAX_LOOP_COST_USD
 # Cap on how much of one fetched page enters the loop's context.
 DISCOVERY_FETCH_MAX_CONTENT_TOKENS = 5000
 # Estimated spend at which the loop stops (checked between turns, from the

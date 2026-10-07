@@ -59,6 +59,7 @@ from src.tracker_schema import (
     VenueTier,
 )
 from src.llm import call_llm
+from src.tracker import deadline_passed
 from src.profile_schema import Profile
 
 PROFILES_DIR = Path(__file__).resolve().parent.parent / "profiles"
@@ -283,8 +284,8 @@ def skip_reason(extraction: ExtractionFacts, today: datetime.date) -> str | None
     any model call, never left to the model to notice)."""
     if extraction.call_status == CallStatus.CLOSED:
         return "call_status is 'closed'"
-    if extraction.has_deadline and extraction.deadline is not None and extraction.deadline < today:
-        return f"deadline {extraction.deadline.isoformat()} has already passed (today={today.isoformat()})"
+    if deadline_passed(extraction, today):
+        return f"deadline {extraction.deadline_as_stated} has already passed (today={today.isoformat()})"
     if extraction.access == AccessType.INVITE_ONLY:
         return "access is 'invite_only'"
     return None

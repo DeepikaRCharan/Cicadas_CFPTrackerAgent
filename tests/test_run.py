@@ -5,6 +5,7 @@ Run with: python -m unittest tests/test_run.py -v
 """
 
 import contextlib
+import datetime
 import io
 import json
 import sys
@@ -356,6 +357,40 @@ class TestTraceOutput(RunTestCase):
         with mock.patch.dict("os.environ", {}, clear=True), contextlib.redirect_stdout(out):
             publish_trace(Trace("t"), Path(self._dir.name) / "t.md")
         self.assertIn("# t", out.getvalue())
+
+
+class TestCallStatusInTheRun(RunTestCase):
+    """The SER2027 case: extraction read the call as closed on its deadline
+    day; code decides it is open, so it is judged."""
+
+    def test_closed_on_deadline_day_is_open_and_judged(self):
+        on_the_day = facts(deadline="2026-10-07", deadline_as_stated="7 October 2026 at 23:59:59 UTC", call_status="closed")
+        run, fakes = self.make_run({ECI_URL: on_the_day})  # run date 2026-10-07
+        self.quiet(run.hand_off, self.profile, Candidate("ECI 2027", 2027, ECI_URL, None, "on_call_page", "r"), self.trace)
+        self.assertIn("judge", [c[0] for c in fakes.calls])
+        entry = load_tracker(self.path).conferences[0]
+        self.assertEqual(entry.extraction.call_status.value, "open")
+        self.assertIn("call status set to open by code (extraction read closed)", "\n".join(self.trace.lines))
+
+    def test_passed_deadline_is_closed_even_if_extraction_read_open(self):
+        passed = facts(deadline="2026-10-06", deadline_as_stated="6 October 2026", call_status="open")
+        run, _ = self.make_run({ECI_URL: passed})
+        self.quiet(run.hand_off, self.profile, Candidate("ECI 2027", 2027, ECI_URL, None, "on_call_page", "r"), self.trace)
+        self.assertIn("call status set to closed by code", "\n".join(self.trace.lines))
+
+    def test_recheck_applies_the_same_rule(self):
+        run, _ = self.make_run({ECI_URL: facts()})
+        self.quiet(run.hand_off, self.profile, Candidate("ECI 2027", 2027, ECI_URL, None, "on_call_page", "r"), self.trace)
+        run2, _ = self.make_run({ECI_URL: facts(call_status="closed")})
+        self.quiet(run2.recheck, self.profile, self.trace, set())
+        self.assertEqual(load_tracker(self.path).conferences[0].extraction.call_status.value, "open")
+        self.assertIn("`eci-2027`: call status set to open by code", "\n".join(self.trace.lines))
+
+    def test_judge_fit_skip_is_month_aware(self):
+        from src.judge_fit import skip_reason
+        month = facts(deadline="2027-04-01", deadline_precision="month", deadline_as_stated="April 2027", call_status="open")
+        self.assertIsNone(skip_reason(month, datetime.date(2027, 4, 15)))  # deadline could still be 30 April
+        self.assertIn("has already passed", skip_reason(month, datetime.date(2027, 5, 1)))
 
 
 if __name__ == "__main__":

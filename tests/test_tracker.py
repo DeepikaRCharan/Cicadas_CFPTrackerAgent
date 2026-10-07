@@ -17,6 +17,8 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.tracker import (
+    decide_call_status,
+    deadline_passed,
     DecisionsError,
     TrackerError,
     load_decisions,
@@ -31,6 +33,7 @@ from src.tracker import (
     upsert_venue,
 )
 from src.tracker_schema import (
+    CallStatus,
     DecisionState,
     Extraction,
     ExtractionFacts,
@@ -39,6 +42,7 @@ from src.tracker_schema import (
     StandardFit,
     VenueTier,
 )
+from tests import render_fixtures as fx
 
 RUN_1 = datetime.datetime(2026, 10, 7, 9, 0, tzinfo=datetime.timezone.utc)
 RUN_2 = datetime.datetime(2026, 11, 7, 9, 0, tzinfo=datetime.timezone.utc)
@@ -393,6 +397,55 @@ class TestReporting(TrackerTestCase):
         tracker.profiles["immune"].snapshot_sent = RUN_1.date()
         record_paper_classification(tracker, "immune", make_classification(profile_hash="h-revised"))
         self.assertEqual(tracker.profiles["immune"].snapshot_sent, RUN_1.date())
+
+
+class TestCallStatusByCode(unittest.TestCase):
+    """Open or closed is decided by code from the deadline and the run date;
+    a call is closed only after its deadline has passed."""
+
+    def facts(self, **overrides):
+        data = fx.eci_extraction().model_dump(exclude={"venue_tier", "venue_tier_reasoning"})
+        data.update(overrides)
+        return ExtractionFacts(**data)
+
+    def decide(self, today, **overrides):
+        return decide_call_status(self.facts(**overrides), today)
+
+    def test_deadline_day_is_still_open_even_if_extraction_read_closed(self):
+        facts, note = self.decide(datetime.date(2027, 3, 31), call_status="closed")
+        self.assertEqual(facts.call_status, CallStatus.OPEN)
+        self.assertIn("set to open by code (extraction read closed)", note)
+        self.assertIn("has not passed", note)
+
+    def test_closed_the_day_after_the_deadline_whatever_extraction_read(self):
+        facts, note = self.decide(datetime.date(2027, 4, 1), call_status="open")
+        self.assertEqual(facts.call_status, CallStatus.CLOSED)
+        self.assertIn("passed on 2027-03-31", note)
+
+    def test_not_yet_open_before_the_deadline_stands(self):
+        facts, note = self.decide(datetime.date(2026, 10, 7))
+        self.assertEqual((facts.call_status, note), (CallStatus.NOT_YET_OPEN, None))
+
+    def test_month_only_deadline_open_until_the_month_ends(self):
+        month = dict(deadline="2027-04-01", deadline_precision="month", deadline_as_stated="April 2027")
+        self.assertEqual(self.decide(datetime.date(2027, 4, 30), call_status="closed", **month)[0].call_status, CallStatus.OPEN)
+        self.assertEqual(self.decide(datetime.date(2027, 5, 1), call_status="open", **month)[0].call_status, CallStatus.CLOSED)
+
+    def test_no_deadline_to_judge_by_closed_becomes_unknown(self):
+        rolling = dict(has_deadline=False, deadline=None, deadline_precision=None, deadline_as_stated=None,
+                       missing_fields=["format_requirements", "fees", "mode"])
+        facts, note = self.decide(datetime.date(2030, 1, 1), call_status="closed", **rolling)
+        self.assertEqual(facts.call_status, CallStatus.UNKNOWN)
+        self.assertIn("no deadline to judge it by", note)
+        incomplete = dict(deadline=None, deadline_precision=None, deadline_as_stated=None, complete=False,
+                          missing_fields=["deadline", "format_requirements", "fees", "mode"])
+        self.assertEqual(self.decide(datetime.date(2027, 1, 1), call_status="closed", **incomplete)[0].call_status,
+                         CallStatus.UNKNOWN)
+
+    def test_deadline_passed_helper(self):
+        f = self.facts()
+        self.assertFalse(deadline_passed(f, datetime.date(2027, 3, 31)))
+        self.assertTrue(deadline_passed(f, datetime.date(2027, 4, 1)))
 
 
 if __name__ == "__main__":
