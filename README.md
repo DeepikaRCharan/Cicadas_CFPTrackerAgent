@@ -26,9 +26,10 @@ Repository secrets (Settings -> Secrets and variables -> Actions):
 `ANTHROPIC_API_KEY`, `RESEND_API_KEY`, `NOTIFY_TO` (your Resend account's
 email address).
 
-A failed run turns red and GitHub emails you. If only some venues failed,
-the digest still arrives, with a *Run problems* section at the bottom; if
-the run crashed, no digest is sent.
+A failed run turns red and GitHub emails you. If part of the run failed
+(some venues, or one paper's whole search), the digest still arrives, with
+a *Run problems* section listing what failed; if the run couldn't start
+(tracker or decisions file unreadable), no digest is sent.
 
 ## Run locally against a scratch tracker
 

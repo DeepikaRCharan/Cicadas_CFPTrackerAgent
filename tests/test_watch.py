@@ -145,6 +145,18 @@ class TestWeekBefore(WatchTestCase):
         self.assertEqual(result.sent, [KYOTO])
         self.assertIn("exact date not published", self.sent_subjects()[-1])
 
+    def test_month_only_sent_once_seven_days_before_month_starts(self):
+        """April 2027 (deadline stored as 1 April): due from 25 March, sent once
+        and stamped, never again on the later days of the window."""
+        for day in range(1, 25):
+            self.assertNotIn(KYOTO, self.watch(D(2027, 3, day)).sent)
+        self.assertIn(KYOTO, self.watch(D(2027, 3, 25)).sent)
+        for later in (D(2027, 3, 26), D(2027, 4, 1), D(2027, 4, 15), D(2027, 4, 30)):
+            self.assertNotIn(KYOTO, self.watch(later).sent)
+        entries = week_before(load_tracker(self.path), KYOTO, fx.IMMUNE)
+        self.assertEqual([(e.date, e.deadline, e.reported) for e in entries], [(D(2027, 3, 25), D(2027, 4, 1), True)])
+        self.assertEqual(len([s for s in self.sent_subjects() if "Kyoto" in s]), 1)
+
     def test_failed_send_is_retried_next_day_without_duplicating(self):
         failing = mock.Mock(side_effect=RuntimeError("Resend down"))
         result = self.watch(D(2027, 3, 24), sender=failing)

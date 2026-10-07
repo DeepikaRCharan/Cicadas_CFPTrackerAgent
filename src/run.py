@@ -22,14 +22,14 @@ scheduled run and an on-demand one:
 Exit codes (the monthly workflow branches on them):
 
 - 0 (EXIT_OK): everything ran.
-- 1 (EXIT_CRASHED): the run crashed outright -- tracker, decisions or
-  profiles unreadable, or a whole profile's classify/discovery failed. The
-  workflow skips the digest: a digest missing a whole paper's search would
-  look like a quiet month.
-- 3 (EXIT_PARTIAL): only some candidates or re-checks failed. The run keeps
-  going past each one (one bad page never throws away the others' work),
-  then exits 3; the workflow still sends the digest, with a "Run problems"
-  section listing each failure, and then fails the job. (2 is skipped
+- 1 (EXIT_CRASHED): the run couldn't start -- tracker, decisions or
+  profiles unreadable. Nothing ran, so the workflow sends no digest.
+- 3 (EXIT_PARTIAL): something failed -- a candidate, a re-check, or a whole
+  paper's classify/discovery. The run keeps going past each failure (one bad
+  page or one paper never throws away the rest), then exits 3; the workflow
+  still sends the digest, with a "Run problems" section listing each
+  failure -- a whole paper's search first, stated plainly, since that digest
+  has nothing new for that paper -- and then fails the job. (2 is skipped
   because argparse exits 2 on a usage error.)
 
 Every failure is a WARNING on stderr, an ::error:: annotation on GitHub
@@ -102,8 +102,8 @@ class Run:
         self.decisions, self.now, self.today = decisions, now, now.date()
         self.live = set(profiles)
         self.rechecked: set[str] = set()
-        self.failures: list[str] = []
-        self.crashed = False
+        self.failures: list[str] = []  # in the order they happened (each trace lists its own slice)
+        self.paper_failures: list[str] = []  # whole-paper failures, also in failures; listed first
 
     def save(self) -> None:
         save_tracker(self.tracker, self.tracker_path)
@@ -113,17 +113,25 @@ class Run:
         _annotate(message)
         self.failures.append(message)
 
-    def fail(self, trace: Trace, what: str, exc: Exception, *, crash: bool = False) -> None:
-        """crash=True: a whole profile's classify/discovery failed (exit 1, no
-        digest). Otherwise one candidate or re-check (exit 3, digest sent)."""
+    def fail(self, trace: Trace, what: str, exc: Exception) -> None:
+        """One candidate or re-check failed; the run moves on."""
         message = f"{what} failed: {type(exc).__name__}: {exc}"
         self.problem(message)
         trace.add(f"- **FAILED**: {message}")
-        self.crashed = self.crashed or crash
+
+    def fail_paper(self, trace: Trace, profile_id: str, exc: Exception) -> None:
+        """A whole paper's classify/discovery failed; the other paper still runs."""
+        message = (f"The whole search for {profile_id} failed, so this digest has nothing new for that paper: "
+                   f"{type(exc).__name__}: {exc}")
+        self.problem(message)
+        self.paper_failures.append(message)
+        trace.add(f"- **FAILED**: {message}")
+
+    def problems(self) -> list[str]:
+        """For the digest: whole-paper failures first, then the rest in order."""
+        return self.paper_failures + [f for f in self.failures if f not in self.paper_failures]
 
     def exit_code(self) -> int:
-        if self.crashed:
-            return EXIT_CRASHED
         return EXIT_PARTIAL if self.failures else EXIT_OK
 
     def ensure_classified(self, profile: Profile) -> None:
@@ -343,7 +351,7 @@ def main(argv: list[str] | None = None) -> int:
                 handed.add(lookup_venue(tracker, candidate.name, candidate.year, candidate.call_page_url).conference_id)
             run.recheck(profile, trace, skip_ids=handed)
         except Exception as exc:
-            run.fail(trace, f"discovery for {profile_id}", exc, crash=True)
+            run.fail_paper(trace, profile_id, exc)
             traceback.print_exc()
         finally:
             trace.heading("Usage and cost")
@@ -358,13 +366,11 @@ def main(argv: list[str] | None = None) -> int:
     for line in _usage_lines():
         print(f"[run] {line[2:]}")
     if args.problems_out:
-        write_problems(args.problems_out, run.crashed, run.failures)
+        write_problems(args.problems_out, False, run.problems())
     code = run.exit_code()
-    if code == EXIT_CRASHED:
-        print("[run] CRASHED: a whole profile's classify or discovery failed -- no digest this run", file=sys.stderr)
-    elif code == EXIT_PARTIAL:
-        print(f"[run] PARTIAL: {len(run.failures)} candidate/re-check failure(s) -- digest goes out with a "
-              "Run problems section, and the job fails", file=sys.stderr)
+    if code == EXIT_PARTIAL:
+        print(f"[run] PARTIAL: {len(run.failures)} failure(s), {len(run.paper_failures)} of them a whole paper's "
+              "search -- digest goes out with a Run problems section, and the job fails", file=sys.stderr)
     return code
 
 

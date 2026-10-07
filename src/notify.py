@@ -108,8 +108,9 @@ def send_and_mark(
 
 def load_run_problems(path: str | Path) -> list[str]:
     """src.run's --problems-out file. Missing or unreadable is an error, not
-    'no problems' -- and a crashed run's file refuses the digest outright
-    (the workflow skips it anyway; this is the backstop)."""
+    'no problems' -- and the file of a run that couldn't start ("crashed")
+    refuses the digest outright (the workflow skips it anyway; this is the
+    backstop)."""
     path = Path(path)
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -117,7 +118,7 @@ def load_run_problems(path: str | Path) -> list[str]:
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise NotifyError(f"can't read run problems from {path}: {type(exc).__name__}: {exc}") from exc
     if crashed:
-        raise NotifyError(f"{path} says the run crashed -- no digest for a crashed run")
+        raise NotifyError(f"{path} says the run couldn't start (crashed) -- no digest for it")
     if not isinstance(problems, list) or not all(isinstance(p, str) for p in problems):
         raise NotifyError(f"{path}: 'problems' must be a list of strings")
     return problems

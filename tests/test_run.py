@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.discover import Candidate, Trace
 from src.run import EXIT_CRASHED, EXIT_OK, EXIT_PARTIAL, Run, write_problems
 from src.run import main as run_main
-from src.tracker import load_tracker, record_paper_classification, upsert_venue
+from src.tracker import load_tracker, record_paper_classification, save_tracker, upsert_venue
 from src.tracker_schema import ExtractionFacts, TrackerFile, VenueTier
 from tests import render_fixtures as fx
 
@@ -84,7 +84,7 @@ class RunTestCase(unittest.TestCase):
         run.extract, run.classify, run.judge_fit = fakes.extract, fakes.classify, fakes.judge_fit
         run.tracker, run.tracker_path, run.profiles = self.tracker, self.path, self.profiles
         run.decisions, run.now, run.today = {}, fx.RUN_1, fx.RUN_1.date()
-        run.live, run.rechecked, run.failures, run.crashed = set(self.profiles), set(), [], False
+        run.live, run.rechecked, run.failures, run.paper_failures = set(self.profiles), set(), [], []
         return run, fakes
 
     def quiet(self, fn, *args, **kwargs):
@@ -218,11 +218,18 @@ class TestExitCodes(RunTestCase):
         self.quiet(run.hand_off, self.profile, Candidate("Broken 2027", 2027, "https://broken.example/cfp", None, "on_call_page", "r"), self.trace)
         self.assertEqual(run.exit_code(), EXIT_PARTIAL)
 
-    def test_profile_level_failure_is_a_crash(self):
+    def test_whole_paper_failure_is_partial_and_listed_first(self):
         run, _ = self.make_run({})
-        self.quiet(run.fail, self.trace, "discovery for immune-tolerance", RuntimeError("401 invalid x-api-key"), crash=True)
         self.quiet(run.hand_off, self.profile, Candidate("Broken 2027", 2027, "https://broken.example/cfp", None, "on_call_page", "r"), self.trace)
-        self.assertEqual(run.exit_code(), EXIT_CRASHED)
+        self.quiet(run.fail_paper, self.trace, "elephant-corridors", RuntimeError("529 overloaded"))
+        self.assertEqual(run.exit_code(), EXIT_PARTIAL)
+        problems = run.problems()
+        self.assertEqual(len(problems), 2)
+        self.assertTrue(problems[0].startswith("The whole search for elephant-corridors failed, so this digest "
+                                               "has nothing new for that paper: RuntimeError: 529 overloaded"))
+        self.assertIn("Broken 2027", problems[1])
+        self.assertEqual(len(run.failures), 2)  # trace order untouched
+        self.assertIn("Broken 2027", run.failures[0])
 
     def test_partial_and_crash_codes_differ_from_argparse_usage_error(self):
         self.assertEqual(len({EXIT_OK, EXIT_CRASHED, EXIT_PARTIAL, 2}), 4)
@@ -246,6 +253,32 @@ class TestExitCodes(RunTestCase):
         data = json.loads(problems.read_text(encoding="utf-8"))
         self.assertTrue(data["crashed"])
         self.assertIn("pending", data["problems"][0])
+
+    def test_one_paper_failing_still_runs_the_other_and_exits_partial(self):
+        record_paper_classification(self.tracker, fx.ELEPHANT, fx._classification(
+            fx.load_profiles()[fx.ELEPHANT], VenueTier.ACADEMIC_PRACTITIONER, ["a", "b", "c"], "r"))
+        save_tracker(self.tracker, self.path)
+        decisions = Path(self._dir.name) / "decisions.json"
+        decisions.write_text("{}", encoding="utf-8")
+        problems = Path(self._dir.name) / "run_problems.json"
+        searched = []
+
+        def fake_discover(profile, *args, **kwargs):
+            searched.append(profile.id)
+            if profile.id == fx.ELEPHANT:
+                raise RuntimeError("529 overloaded")
+            return NS(candidates=[], fetched_text={})
+
+        out = io.StringIO()
+        with mock.patch("src.run.discover", side_effect=fake_discover), contextlib.redirect_stdout(out),                 contextlib.redirect_stderr(out):
+            code = run_main(["--tracker", str(self.path), "--decisions", str(decisions), "--problems-out", str(problems),
+                             "--traces-dir", str(Path(self._dir.name) / "traces")])
+        self.assertEqual(code, EXIT_PARTIAL)
+        self.assertEqual(sorted(searched), sorted([fx.ELEPHANT, fx.IMMUNE]))
+        data = json.loads(problems.read_text(encoding="utf-8"))
+        self.assertFalse(data["crashed"])
+        self.assertEqual(len(data["problems"]), 1)
+        self.assertTrue(data["problems"][0].startswith("The whole search for elephant-corridors failed"))
 
     def test_write_problems_round_trips(self):
         path = Path(self._dir.name) / "p.json"
