@@ -1,7 +1,69 @@
 {
   "schema_version": 6,
-  "last_run": null,
-  "profiles": {},
-  "conferences": [],
+  "last_run": "2026-10-07T04:33:16Z",
+  "profiles": {
+    "elephant-corridors": {
+      "paper_bucket": [
+        "academic_practitioner"
+      ],
+      "paper_bucket_cues": [
+        "This paper synthesizes the ecological necessity of elephant corridors",
+        "technological mechanics of spatial modeling and least-cost path identification",
+        "examine the evolution of legal frameworks and administrative mandates",
+        "Keywords: Spatial Ecology, Least-Cost Path Modeling, Habitat Fragmentation"
+      ],
+      "paper_bucket_reasoning": "The abstract is written as a scholarly synthesis integrating ecological theory, spatial modeling methodology, and policy analysis, using domain-fluent terminology (least-cost path modeling, environmental stochasticity, genetic diversity) aimed at conservation researchers rather than decision-makers or trade readers. Its structure (synthesis of mechanisms, bottlenecks, and policy evolution) and citation-aware framing match a peer-reviewed research paper register rather than industry news or institutional reporting.",
+      "profile_hash": "5bb76ed56519e8feb38b3719f774a653af73f630b46576c9b88ca47c6e6131f3",
+      "classified_at": "2026-10-07T04:33:20.973929Z",
+      "snapshot_sent": "2026-10-07"
+    },
+    "immune-tolerance": {
+      "paper_bucket": [
+        "academic_practitioner"
+      ],
+      "paper_bucket_cues": [
+        "molecular mechanism of their development",
+        "retroviral gene transfer of Foxp3 converts naïve T cells",
+        "genetically defective in an autoimmune and inflammatory syndrome in humans and mice",
+        "key regulatory gene for the development of regulatory T cells"
+      ],
+      "paper_bucket_reasoning": "This is a primary research report presenting experimental immunology findings (gene expression, retroviral transduction assays) with precise, citation-ready scientific claims aimed at immunologists and molecular biologists already fluent in T cell biology. The register is rigorous, evidence-scoped, and hypothesis-driven, typical of a peer-reviewed journal article rather than trade press, executive/policy framing, or any other avenue.",
+      "profile_hash": "98ed994208f47c271fb2b678d34d61677ccfde42cd3756aed743afe430cc4b40",
+      "classified_at": "2026-10-07T04:34:43.025066Z",
+      "snapshot_sent": "2026-10-07"
+    }
+  },
+  "conferences": [
+    {
+      "id": "ser2027-12th-world-conference-on-ecological-restoration-2027",
+      "name": "SER2027 - 12th World Conference on Ecological Restoration",
+      "url": "https://ser2027.org/call-for-proposals/",
+      "dates_url": null,
+      "first_seen": "2026-10-07T04:33:16Z",
+      "last_checked": "2026-10-07T04:33:16Z",
+      "extraction": {
+        "has_deadline": true,
+        "deadline": "2026-10-07",
+        "deadline_precision": "exact",
+        "deadline_as_stated": "7 October 2026 at 23:59:59 UTC",
+        "submission_opens": "06 August 2026",
+        "call_status": "closed",
+        "submission_type": "symposium proposals and training course proposals",
+        "format_requirements": "Symposia consist of 4-6 formal presentations; 90-minute or 120-minute sessions. Training courses typically no shorter than 4 hours, can run one full day or span two days. Title max. 25 words; abstract max. 250 words; one-sentence summary max. 50 words.",
+        "fees": "Participants in training courses will pay a separate fee over and above conference registration (to be determined)",
+        "mode": "in-person",
+        "theme": "ecological restoration",
+        "location": "Lisbon",
+        "access": "open",
+        "complete": true,
+        "missing_fields": [],
+        "venue_tier": [
+          "academic_practitioner"
+        ],
+        "venue_tier_reasoning": "This is the Call for Proposals for the Society for Ecological Restoration's World Conference, a peer-reviewed academic/professional conference. Proposals are evaluated by a Program Committee on \"scientific merit,\" \"new research results,\" \"cutting-edge developments,\" and \"innovative or interdisciplinary approaches,\" alongside \"broad applicability for restoration professionals.\" Submissions require abstracts, speaker affiliations, and go through a formal peer-review process. The content blends rigorous research framing (symposia with scientific synthesis) with practitioner training courses aimed at professional development and skills-building for restoration practitioners—both squarely within the academic/practitioner research-conference register rather than trade press, executive/policy audiences, or informal media."
+      },
+      "matches": {}
+    }
+  ],
   "identity_conflicts": []
 }
