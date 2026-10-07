@@ -69,7 +69,7 @@ from src.config import (
     WEB_TOOL_TYPES,
 )
 from src.profile_schema import Profile
-from src.tracker import is_open, lookup_venue, normalize_url
+from src.tracker import deadline_passed, is_open, lookup_venue, normalize_url
 from src.tracker_schema import CallStatus, ProfileClassification, TrackerFile, VenueTier
 
 BUCKET_LABELS = {
@@ -835,8 +835,9 @@ def _log_limits(state: _State, trace: Trace) -> None:
 
 
 class _Handlers:
-    def __init__(self, state, tracker, profile_id, trace):
+    def __init__(self, state, tracker, profile_id, trace, today: datetime.date):
         self.state, self.tracker, self.profile_id, self.trace = state, tracker, profile_id, trace
+        self.today = today
 
     def run(self, block) -> dict:
         args = block.input if isinstance(block.input, dict) else {}
@@ -893,7 +894,7 @@ class _Handlers:
             return "tracked_open", f"{entry.id!r} is tracked and open for this paper -- re-checked by code every run, skip it"
         if match is not None:
             return "tracked_closed", f"{entry.id!r} is closed for this paper ({match.decision.value}) -- skip it"
-        if entry.extraction.call_status == CallStatus.CLOSED:
+        if deadline_passed(entry.extraction, self.today):  # closed by the deadline, never by a stored reading
             return "tracked_closed", f"{entry.id!r} is tracked and its call is closed -- skip it"
         return "tracked_other_paper", f"{entry.id!r} is tracked for another paper -- may be accepted, to score it for this one"
 
@@ -1056,7 +1057,7 @@ def discover(
     if model not in WEB_TOOL_TYPES:
         raise ValueError(f"no web tool versions configured for {model!r} (config.WEB_TOOL_TYPES)")
     state = _State(limits=limits, probes=probes, model=model)
-    handlers = _Handlers(state, tracker, profile.id, trace)
+    handlers = _Handlers(state, tracker, profile.id, trace, today)
     probe_searches = min(len(probes), limits.probe_reserve, limits.searches)
 
     trace.add(

@@ -751,5 +751,33 @@ class TestProbeNearVariants(unittest.TestCase):
         self.assertFalse(probe_covered(VenueTier.OTHER_AVENUES, ["Regulatory T cells call for papers 2026"]))
 
 
+class TestTrackedClosedByDeadline(DiscoverTestCase):
+    """A venue tracked under another paper is 'closed' only once its deadline
+    has passed -- not because an old extraction stored call_status closed."""
+
+    def seed_other_paper(self, deadline, deadline_as_stated):
+        elephant = self.profiles[fx.ELEPHANT]
+        record_paper_classification(self.tracker, fx.ELEPHANT, fx._classification(
+            elephant, VenueTier.ACADEMIC_PRACTITIONER, ["a", "b", "c"], "r"))
+        ext = fx.eci_extraction(call_status="closed").model_copy(update={"deadline": deadline, "deadline_as_stated": deadline_as_stated})
+        with contextlib.redirect_stdout(io.StringIO()):
+            upsert_venue(self.tracker, name="ECI 2027", year=2027, url=ECI["call_page_url"], extraction=ext,
+                         profile_id=fx.ELEPHANT, live_profile_ids={fx.ELEPHANT, fx.IMMUNE}, now=fx.RUN_1,
+                         fit_by_tier=fx._fit(elephant, (10, "t"), (10, "g"), (10, "f")))
+
+    def check(self):
+        api = FakeAPI(response(tool("check_tracker", "c1", name="ECI 2027", year=2027, url=ECI["call_page_url"])), finish("done"))
+        self.run_loop(api, Limits(**SINGLE_PHASE))
+        return self.turns_text()
+
+    def test_stored_closed_with_deadline_ahead_may_be_accepted(self):
+        self.seed_other_paper(datetime.date(2026, 10, 1), "1 October 2026")  # TODAY is 2026-10-01: deadline day
+        self.assertIn("code: tracked_other_paper", self.check())
+
+    def test_deadline_passed_is_closed(self):
+        self.seed_other_paper(datetime.date(2026, 9, 30), "30 September 2026")
+        self.assertIn("code: tracked_closed", self.check())
+
+
 if __name__ == "__main__":
     unittest.main()
