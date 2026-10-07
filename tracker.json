@@ -1,6 +1,6 @@
 {
   "schema_version": 6,
-  "last_run": "2026-10-07T04:50:56Z",
+  "last_run": "2026-10-07T05:41:10Z",
   "profiles": {
     "elephant-corridors": {
       "paper_bucket": [
@@ -39,6 +39,7 @@
       "name": "SER2027 - 12th World Conference on Ecological Restoration",
       "url": "https://ser2027.org/call-for-proposals/",
       "dates_url": null,
+      "aliases": [],
       "first_seen": "2026-10-07T04:33:16Z",
       "last_checked": "2026-10-07T04:33:16Z",
       "extraction": {
@@ -63,6 +64,182 @@
         "venue_tier_reasoning": "This is the Call for Proposals for the Society for Ecological Restoration's World Conference, a peer-reviewed academic/professional conference. Proposals are evaluated by a Program Committee on \"scientific merit,\" \"new research results,\" \"cutting-edge developments,\" and \"innovative or interdisciplinary approaches,\" alongside \"broad applicability for restoration professionals.\" Submissions require abstracts, speaker affiliations, and go through a formal peer-review process. The content blends rigorous research framing (symposia with scientific synthesis) with practitioner training courses aimed at professional development and skills-building for restoration practitioners—both squarely within the academic/practitioner research-conference register rather than trade press, executive/policy audiences, or informal media."
       },
       "matches": {}
+    },
+    {
+      "id": "landscape-ecology-landscape-ecology-in-latin-america-knowledge-challenges-and-future-directions-from-the-global-south-2026",
+      "name": "Landscape Ecology - Landscape Ecology in Latin America: Knowledge, Challenges, and Future Directions from the Global South",
+      "url": "https://link.springer.com/journal/10980/collections",
+      "dates_url": null,
+      "aliases": [],
+      "first_seen": "2026-10-07T05:41:10Z",
+      "last_checked": "2026-10-07T05:41:10Z",
+      "extraction": {
+        "has_deadline": false,
+        "deadline": null,
+        "deadline_precision": null,
+        "deadline_as_stated": null,
+        "submission_opens": null,
+        "call_status": "unknown",
+        "submission_type": null,
+        "format_requirements": null,
+        "fees": null,
+        "mode": null,
+        "theme": null,
+        "location": null,
+        "access": null,
+        "complete": false,
+        "missing_fields": [
+          "submission_type",
+          "theme",
+          "submission_opens",
+          "location",
+          "access",
+          "format_requirements",
+          "fees",
+          "mode"
+        ],
+        "venue_tier": [
+          "academic_practitioner"
+        ],
+        "venue_tier_reasoning": "The URL indicates this is a Springer journal page (journal/10980, i.e. Landscape Ecology), which is a peer-reviewed academic journal. Although the page content failed to load (JavaScript disabled message), the identifiable structure—a Springer journal's 'collections' page—places it squarely in the academic_practitioner bucket as a scholarly, peer-reviewed publication venue for domain researchers."
+      },
+      "matches": {
+        "elephant-corridors": {
+          "fit_by_tier": {},
+          "decision": "pending",
+          "notifications": [],
+          "notes": ""
+        }
+      }
+    },
+    {
+      "id": "frontiers-research-topic-megafauna-extinctions-reconsidered-perspectives-from-around-the-globe-2027",
+      "name": "Frontiers Research Topic: Megafauna Extinctions Reconsidered: Perspectives from around the Globe",
+      "url": "https://www.frontiersin.org/research-topics/83132/megafauna-extinctions-reconsidered-perspectives-from-around-the-globe",
+      "dates_url": null,
+      "aliases": [],
+      "first_seen": "2026-10-07T05:41:10Z",
+      "last_checked": "2026-10-07T05:41:10Z",
+      "extraction": {
+        "has_deadline": true,
+        "deadline": "2027-02-26",
+        "deadline_precision": "exact",
+        "deadline_as_stated": "26 February 2027",
+        "submission_opens": null,
+        "call_status": "open",
+        "submission_type": "manuscript",
+        "format_requirements": null,
+        "fees": "publishing fee charged to Authors, institutions, or funders",
+        "mode": null,
+        "theme": "megafauna extinctions, Late Pleistocene paleontology, and conservation",
+        "location": null,
+        "access": "open",
+        "complete": true,
+        "missing_fields": [
+          "submission_opens",
+          "location",
+          "format_requirements",
+          "mode"
+        ],
+        "venue_tier": [
+          "academic_practitioner"
+        ],
+        "venue_tier_reasoning": "This is a Frontiers journal Research Topic (a peer-reviewed article collection within Frontiers in Mammal Science), soliciting original research, reviews, case reports, and methods papers from domain researchers (paleontology, zooarchaeology, ecology, biomolecular science). It has named topic editors affiliated with research institutes/universities, a formal peer-review process, publishing fees, and a scholarly article-type list (Original Research, Systematic Review, Hypothesis and Theory, etc.), all indicative of a rigorous, citation-aware academic venue aimed at domain experts rather than industry, policy, or general audiences."
+      },
+      "matches": {
+        "elephant-corridors": {
+          "fit_by_tier": {
+            "academic_practitioner": {
+              "overall": 38,
+              "scored_at": "2026-10-07T05:42:16.606519Z",
+              "profile_hash": "5bb76ed56519e8feb38b3719f774a653af73f630b46576c9b88ca47c6e6131f3",
+              "theme_fit": {
+                "score": 18,
+                "reasoning": "The venue's core theme is Late Pleistocene megafauna extinctions, integrating paleontology, zooarchaeology, and biomolecular science, with a \"particular focus\" on linking past extinctions to present-day conservation (rewilding, reintroduction programs, conservation planning). The paper, however, is about present-day elephant corridor ecology, spatial/least-cost-path modeling, infrastructure fragmentation, and policy frameworks for living megafauna connectivity — it has nothing to do with Late Pleistocene extinction events, paleontological or zooarchaeological evidence, or the causes/consequences of historical megafauna die-offs. While the venue does welcome contributions on \"ecological consequences of megafauna loss\" with \"implications for... conservation planning,\" the paper's subject is forward-looking landscape connectivity for extant elephants rather than reconstructing or drawing lessons from Pleistocene extinction events. The overlap is only in the broad keyword \"megafauna\" and tangential interest in conservation, not in the venue's actual scope of extinction causes, paleoecological reconstruction, or rewilding tied to historical loss. This is a loose, surface-level connection rather than central overlap with the stated Research Topic."
+              },
+              "genre_fit": {
+                "score": 20,
+                "reasoning": "The venue's call is explicitly framed around \"Late Pleistocene megafauna extinctions\" and welcomes paleontological, zooarchaeological, and biomolecular methods (ancient DNA, sedaDNA, palaeoproteomics, isotope analysis) or interdisciplinary syntheses linking past extinction to present rewilding/conservation planning — its core evidentiary expectation is paleoecological or archaeological data analysis, even when discussing present-day implications. The paper, by contrast, is a policy/synthesis piece about present-day elephant corridor connectivity, spatial modeling (least-cost path), and legal/administrative frameworks — it contains no paleontological, zooarchaeological, or biomolecular content, and doesn't address Late Pleistocene extinction dynamics at all. While the Research Topic does mention \"spatial modelling\" and \"conservation planning\" as welcome, these are listed as tools for addressing the extinction-to-conservation link, not a free-standing contemporary corridor/policy paper. The paper's method is a literature synthesis/review of ecological and legal literature, not an empirical study with the kind of methodological rigor (new site data, isotopic/genetic data, faunal assemblages) that this Research Topic's reviewers are set up to evaluate. The topical gap (no engagement with Late Pleistocene extinction causes or legacies) plus the mismatch in evidentiary type make this a poor fit despite nominal overlap in 'megafauna' and 'conservation' keywords."
+              },
+              "format_fit": {
+                "score": 75,
+                "reasoning": "The venue accepts standard Frontiers manuscript types (Original Research, Review, Perspective, Hypothesis and Theory, Mini Review, General Commentary, etc.) via full manuscript submission, with no stated length limits on this page. The paper is described as a synthesis paper (\"This paper synthesizes the ecological necessity of elephant corridors...\") which fits naturally into formats like \"Review,\" \"Perspective,\" or \"Hypothesis and Theory\" that Frontiers supports. There is no indication of word-count mismatch or an incompatible format (e.g., no short abstract-only or conference-talk requirement here) — it is a standard journal manuscript pipeline, and the paper is already manuscript-length, so no significant resizing or reshaping is indicated by the paper's own description."
+              }
+            }
+          },
+          "decision": "pending",
+          "notifications": [],
+          "notes": ""
+        }
+      }
+    },
+    {
+      "id": "immunology2027tm-2027",
+      "name": "IMMUNOLOGY2027™",
+      "url": "https://immunology2027.aai.org/abstracts/",
+      "dates_url": "https://immunology2027.aai.org/key-dates-2/",
+      "aliases": [],
+      "first_seen": "2026-10-07T05:41:10Z",
+      "last_checked": "2026-10-07T05:41:10Z",
+      "extraction": {
+        "has_deadline": true,
+        "deadline": "2026-11-17",
+        "deadline_precision": "exact",
+        "deadline_as_stated": "November 17, 2026",
+        "submission_opens": "October 6, 2026",
+        "call_status": "open",
+        "submission_type": "abstract",
+        "format_requirements": null,
+        "fees": null,
+        "mode": null,
+        "theme": "immunology",
+        "location": "Los Angeles",
+        "access": "open",
+        "complete": true,
+        "missing_fields": [
+          "format_requirements",
+          "fees",
+          "mode"
+        ],
+        "venue_tier": [
+          "academic_practitioner"
+        ],
+        "venue_tier_reasoning": "This is the abstract submission/CFP page for IMMUNOLOGY2027, the American Association of Immunologists' annual meeting. It involves peer-style abstract submission across 27 research topic categories, AAI membership benefits for researchers, and standard academic conference logistics (abstract deadlines, registration fees, late-breaking abstracts). This is a formal research conference aimed at immunology researchers presenting their own research, matching the academic_practitioner bucket."
+      },
+      "matches": {
+        "immune-tolerance": {
+          "fit_by_tier": {
+            "academic_practitioner": {
+              "overall": 77,
+              "scored_at": "2026-10-07T05:43:30.469458Z",
+              "profile_hash": "98ed994208f47c271fb2b678d34d61677ccfde42cd3756aed743afe430cc4b40",
+              "theme_fit": {
+                "score": 90,
+                "reasoning": "The paper is a core immunology research paper on regulatory T cell development, Foxp3 transcription factor function, and immune self-tolerance — squarely within mainstream immunology. The venue is AAI's IMMUNOLOGY2027 conference, the major general immunology meeting, which states abstracts are organized across \"27 topic categories\" (not listed in detail here, but AAI's annual meeting broadly covers T cell biology, tolerance, autoimmunity, etc.). While the specific topic categories aren't enumerated on this page, the venue's stated theme is simply \"immunology\" and this paper's subject (regulatory T cells, Foxp3, autoimmunity) is a textbook example of central immunology research, not a tangential mention. This is a strong thematic match."
+              },
+              "genre_fit": {
+                "score": 62,
+                "reasoning": "The paper is a primary molecular immunology research report (Foxp3's role in Treg development, with gene transfer experiments) typical of a landmark basic-science journal article. The venue is AAI's IMMUNOLOGY2027 conference abstract submission page, which calls for \"abstracts\" across \"27 topic categories\" for conference presentation—a very different genre than a full research article. However, this is a research-focused immunology conference (not a trade/practitioner venue), and abstract submissions at such conferences typically summarize exactly this kind of mechanistic, hypothesis-driven experimental immunology work (gene expression, functional assays, phenotype conversion) that reviewers at AAI would be well-equipped to evaluate. The page gives no explicit standards for rigor or evidence level, but conference abstracts generally accept a condensed version of full research findings, and this paper's content (molecular/cellular immunology, CD4+ T cell biology) matches the core subject matter AAI abstracts cover. The main uncertainty is that the paper as given is a full manuscript, not an abstract, and the venue's own text offers no explicit criteria about expected rigor beyond basic categorization, so I can't confirm how reviewers would judge a condensed abstract version. Given the strong thematic and methodological alignment with immunology research but the genre mismatch (full paper vs. abstract) and lack of explicit abstract-review rigor criteria, this is a workable but not perfect fit."
+              },
+              "format_fit": {
+                "score": 80,
+                "reasoning": "The venue calls for \"abstract\" submissions (submission_type: abstract) for a conference presentation, with no stated length/format requirements on this page. The paper as given is a full research paper with a complete abstract already provided (a concise paragraph summarizing background, findings, and conclusion), which is typical of the kind of abstract conference abstract-submission systems expect. It would likely need no or minimal adaptation beyond conforming to whatever word limit AAI imposes (not stated here), but the existing abstract is already in the right shape for this format. Some uncertainty remains since specific formatting/length rules aren't stated on this page."
+              }
+            }
+          },
+          "decision": "pending",
+          "notifications": [
+            {
+              "date": "2026-10-07",
+              "reason": "new_fit",
+              "deadline": "2026-11-17",
+              "run_at": "2026-10-07T05:41:10Z",
+              "reported": true
+            }
+          ],
+          "notes": ""
+        }
+      }
     }
   ],
   "identity_conflicts": []
