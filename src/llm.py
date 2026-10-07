@@ -8,7 +8,19 @@ from dotenv import load_dotenv
 # is a harmless no-op there.
 load_dotenv()
 
-_client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+# Created on first use, not at import: importing this module (as the unit
+# tests and the no-LLM daily watcher's test step do) must not need the key.
+_client: Anthropic | None = None
+
+
+def _get_client() -> Anthropic:
+    global _client
+    if _client is None:
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+        if not api_key:
+            raise RuntimeError("ANTHROPIC_API_KEY not set -- add to .env locally or to the GitHub Actions secrets")
+        _client = Anthropic(api_key=api_key)
+    return _client
 
 # Running per-model totals for this process, so a run can report what it
 # spent: {model: {"calls", "input_tokens", "output_tokens", "searches", "fetches"}}.
@@ -48,7 +60,7 @@ def call_llm(model, messages, tools=None, tool_choice=None, system=None, max_tok
         kwargs["system"] = system
 
     kwargs.update(extra)
-    response = _client.messages.create(**kwargs)
+    response = _get_client().messages.create(**kwargs)
 
     usage = response.usage
     cache_write = getattr(usage, "cache_creation_input_tokens", 0) or 0
