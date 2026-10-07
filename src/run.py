@@ -57,7 +57,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from src.config import DECISIONS_PATH, LOGS_DIR, MODEL_DISCOVERY, TRACES_DIR, TRACKER_PATH, WEB_TOOL_TYPES
-from src.discover import BUCKET_LABELS, Candidate, Limits, Trace, discover, page_key
+from src.discover import BUCKET_LABELS, MIN_READABLE_CHARS, Candidate, Limits, Trace, discover, page_key
 from src.profile_schema import Profile, load_live_profiles
 from src.tracker import (
     DecisionsError,
@@ -85,6 +85,17 @@ EXIT_PARTIAL = 3
 def _annotate(message: str) -> None:
     if os.environ.get("GITHUB_ACTIONS") == "true":
         print(f"::error title=Cicadas run::{message}")
+
+
+def readable_text(text: str) -> bool:
+    """The search loop's readability rule (discover.MIN_READABLE_CHARS), for
+    the hand-off's and re-check's own fetches."""
+    return len(text.strip()) >= MIN_READABLE_CHARS
+
+
+def _preview(text: str, n: int = 60) -> str:
+    flat = " ".join(text.split())
+    return f'"{flat[:n]}{"..." if len(flat) > n else ""}"'
 
 
 def write_problems(path: str | Path, crashed: bool, problems: list[str]) -> None:
@@ -209,21 +220,35 @@ class Run:
     # --- step 3: hand-off --------------------------------------------------------
 
     def page_text(self, urls: list[str], loop_text: dict[str, str], trace: Trace) -> str:
-        """Fetch the pages directly; if a site blocks that (bot walls, 403s),
-        fall back to the readable copies the discovery loop already fetched
-        through Anthropic's web_fetch. With neither, the error stands."""
-        try:
-            return self.extract.fetch_text(urls)
-        except RuntimeError as exc:
-            copies = [loop_text.get(page_key(u)) for u in urls]
-            if copies[0] is None:
-                raise
-            kept = [(u, t) for u, t in zip(urls, copies) if t is not None]
-            trace.add(f"- direct fetch failed ({exc}); using the discovery loop's fetched copy of "
-                      f"{', '.join(u for u, _ in kept)}")
-            if len(kept) == 1:
-                return kept[0][1]
-            return "\n\n".join(f"=== Page: {u} ===\n{t}" for u, t in kept)
+        """Fetch each page directly. A page whose fetch fails (403, timeout)
+        or comes back unreadable by the search loop's own rule (fewer than
+        MIN_READABLE_CHARS characters of text: a "JavaScript is disabled"
+        shell, a bot wall) is replaced by the readable copy the loop already
+        fetched through Anthropic's web_fetch. A call page with neither is an
+        error; a dates page with neither is left out, and the trace says so."""
+        kept: list[tuple[str, str]] = []
+        for i, url in enumerate(urls):
+            problem = None
+            try:
+                text = self.extract.fetch_text([url])
+                if not readable_text(text):
+                    problem = f"unreadable: {len(text.strip())} characters of text ({_preview(text)})"
+            except RuntimeError as exc:
+                problem = f"failed: {exc}"
+            if problem is None:
+                kept.append((url, text))
+                continue
+            copy = loop_text.get(page_key(url))
+            if copy is not None:
+                trace.add(f"- direct fetch of {url} {problem}; using the discovery loop's readable copy")
+                kept.append((url, copy))
+            elif i == 0:
+                raise RuntimeError(f"call page {url} {problem}, and the discovery loop has no readable copy")
+            else:
+                trace.add(f"- direct fetch of {url} {problem}, and no loop copy -- left out")
+        if len(kept) == 1:
+            return kept[0][1]
+        return "\n\n".join(f"=== Page: {u} ===\n{t}" for u, t in kept)
 
     def hand_off(self, profile: Profile, candidate: Candidate, trace: Trace,
                  loop_text: dict[str, str] | None = None) -> str:
@@ -305,6 +330,10 @@ class Run:
             try:
                 urls = [conference.url] + ([conference.dates_url] if conference.dates_url else [])
                 page_text = self.extract.fetch_text(urls)
+                if not readable_text(page_text):
+                    # no loop copy on a re-check: never overwrite a tracked entry from a shell page
+                    raise RuntimeError(f"page unreadable ({len(page_text.strip())} characters of text: "
+                                       f"{_preview(page_text)}) -- tracked entry left unchanged")
                 facts = self.call_status(self.extract.extract_facts_from_text(conference.url, page_text, self.today),
                                          trace, conference.id)
                 was_complete = conference.extraction.complete

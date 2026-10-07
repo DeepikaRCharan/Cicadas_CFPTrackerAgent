@@ -25,6 +25,11 @@ from src.tracker_schema import ExtractionFacts, TrackerFile, VenueTier
 from tests import render_fixtures as fx
 
 ECI_URL = "https://eci2027.org/call-for-abstracts/"
+READABLE_PAGE = "Call for abstracts. Submission deadline: 31 March 2027. " * 10  # over the 300-character rule
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
+SPRINGER_URL = "https://link.springer.com/journal/10980/collections"
+SPRINGER_WALL = (FIXTURES / "springer_js_wall.txt").read_text(encoding="utf-8")
+SPRINGER_LOOP = (FIXTURES / "springer_loop_fetch.txt").read_text(encoding="utf-8").split("\n", 4)[4]  # minus log header
 
 
 def facts(**overrides):
@@ -46,11 +51,15 @@ class Fakes:
         self.classify = NS(classify_venue=self.classify_venue)
         self.judge_fit = NS(judge_fit_for_venue=self.judge)
 
+    pages: dict = {}  # url -> text the direct fetch returns (default: a normal readable page)
+
     def fetch_text(self, urls):
         self.calls.append(("fetch", tuple(urls)))
         if any("broken" in u for u in urls):
             raise RuntimeError("failed to fetch: HTTP 403")
-        return "page text"
+        if len(urls) == 1 and urls[0] in self.pages:
+            return self.pages[urls[0]]
+        return READABLE_PAGE
 
     def extract_facts(self, url, page_text, today):
         self.calls.append(("extract", url))
@@ -108,7 +117,8 @@ class TestHandOff(RunTestCase):
         run, fakes = self.make_run({ECI_URL: facts()})
         candidate = Candidate("ECI 2027", 2027, ECI_URL, "https://eci2027.org/dates", "on_dates_page", "live")
         self.quiet(run.hand_off, self.profile, candidate, self.trace)
-        self.assertIn(("fetch", (ECI_URL, "https://eci2027.org/dates")), fakes.calls)
+        self.assertIn(("fetch", (ECI_URL,)), fakes.calls)  # each page fetched (and checked) on its own
+        self.assertIn(("fetch", ("https://eci2027.org/dates",)), fakes.calls)
         self.assertEqual(load_tracker(self.path).conferences[0].dates_url, "https://eci2027.org/dates")
 
     def test_incomplete_candidate_tracked_but_not_judged(self):
@@ -155,7 +165,7 @@ class TestHandOff(RunTestCase):
                    self.trace, {url.replace("https://", "").lower(): "loop copy " * 50})
         self.assertEqual([c[0] for c in fakes.calls], ["fetch", "extract", "classify", "judge"])
         self.assertEqual(run.failures, [])
-        self.assertIn("using the discovery loop's fetched copy", "\n".join(self.trace.lines))
+        self.assertIn("using the discovery loop's readable copy", "\n".join(self.trace.lines))
 
     def test_blocked_direct_fetch_without_loop_copy_fails_visibly(self):
         url = "https://broken.example/special-issue"
@@ -409,6 +419,73 @@ class TestHandOffAlias(RunTestCase):
         self.assertEqual(([c.id for c in saved.conferences], saved.identity_conflicts), (["eci-2027"], []))
         self.assertEqual(saved.conferences[0].aliases, ["European Congress of Immunology 2027"])
         self.assertNotIn("classify", [c[0] for c in fakes.calls])  # the tracked venue's buckets are reused
+
+
+class TestUnreadableDirectFetch(RunTestCase):
+    """The Springer case: the hand-off's own fetch got a 'JavaScript is
+    disabled' shell (286 characters of text) while the search loop's copy was readable."""
+
+    def springer_run(self, loop_copy=True):
+        seen = {}
+        springer_facts = facts(deadline="2026-12-31", deadline_as_stated="31 December 2026", call_status="open")
+        run, fakes = self.make_run({SPRINGER_URL: springer_facts})
+        fakes.pages = {SPRINGER_URL: SPRINGER_WALL}
+        original = fakes.extract.extract_facts_from_text
+        fakes.extract.extract_facts_from_text = lambda url, text, today: (seen.setdefault("text", text), original(url, text, today))[1]
+        loop = {"link.springer.com/journal/10980/collections": SPRINGER_LOOP} if loop_copy else {}
+        candidate = Candidate("Landscape Ecology in Latin America", 2026, SPRINGER_URL, None, "on_call_page", "r",
+                              deadline_quote="Submission status Open Submission deadline 31 December 2026")
+        outcome = self.quiet(run.hand_off, self.profile, candidate, self.trace, loop)
+        return run, fakes, outcome, seen.get("text")
+
+    def test_saved_wall_page_fails_the_loops_readability_rule(self):
+        from src.run import readable_text
+        self.assertIn("JavaScript is disabled", SPRINGER_WALL)
+        self.assertFalse(readable_text(SPRINGER_WALL))
+        self.assertTrue(readable_text(SPRINGER_LOOP))
+
+    def test_wall_page_replaced_by_the_loops_readable_copy(self):
+        run, fakes, outcome, text = self.springer_run()
+        self.assertEqual(outcome, "created")
+        self.assertEqual(text, SPRINGER_LOOP)  # extraction read the loop's copy, never the shell
+        self.assertIn("Submission deadline\n31 December 2026", text)
+        trace = "\n".join(self.trace.lines)
+        self.assertIn(f"- direct fetch of {SPRINGER_URL} unreadable: 286 characters of text", trace)
+        self.assertIn("using the discovery loop's readable copy", trace)
+        self.assertEqual(run.failures, [])
+
+    def test_wall_page_without_a_loop_copy_fails_visibly_and_tracks_nothing(self):
+        run, fakes, outcome, text = self.springer_run(loop_copy=False)
+        self.assertEqual(outcome, "failed")
+        self.assertIsNone(text)  # never extracted from the shell
+        self.assertIn("call page https://link.springer.com/journal/10980/collections unreadable", run.failures[0])
+        self.assertFalse(self.path.exists())
+
+    def test_unreadable_dates_page_left_out_but_call_page_kept(self):
+        dates = "https://eci2027.org/dates"
+        run, fakes = self.make_run({ECI_URL: facts()})
+        fakes.pages = {dates: SPRINGER_WALL}
+        seen = {}
+        original = fakes.extract.extract_facts_from_text
+        fakes.extract.extract_facts_from_text = lambda url, text, today: (seen.setdefault("text", text), original(url, text, today))[1]
+        self.quiet(run.hand_off, self.profile, Candidate("ECI 2027", 2027, ECI_URL, dates, "on_call_page", "r"), self.trace, {})
+        self.assertEqual(seen["text"], READABLE_PAGE)
+        self.assertIn(f"- direct fetch of {dates} unreadable", "\n".join(self.trace.lines))
+        self.assertIn("left out", "\n".join(self.trace.lines))
+
+    def test_recheck_of_a_wall_page_fails_and_leaves_the_entry_unchanged(self):
+        run, fakes = self.make_run({ECI_URL: facts()})
+        self.quiet(run.hand_off, self.profile, Candidate("ECI 2027", 2027, ECI_URL, None, "on_call_page", "r"), self.trace)
+        before = self.path.read_bytes()
+        run2, fakes2 = self.make_run({ECI_URL: facts(has_deadline=False, deadline=None, deadline_precision=None,
+                                                     deadline_as_stated=None, missing_fields=["format_requirements", "fees", "mode"])})
+        fakes2.pages = {ECI_URL: SPRINGER_WALL}
+        # re-check fetches [url] with no dates page, so the fake's per-URL page applies
+        self.quiet(run2.recheck, self.profile, self.trace, set())
+        self.assertNotIn("extract", [c[0] for c in fakes2.calls])
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertIn("page unreadable (286 characters of text", run2.failures[0])
+        self.assertIn("tracked entry left unchanged", run2.failures[0])
 
 
 if __name__ == "__main__":
