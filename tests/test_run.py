@@ -6,16 +6,19 @@ Run with: python -m unittest tests/test_run.py -v
 
 import contextlib
 import io
+import json
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace as NS
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.discover import Candidate, Trace
-from src.run import Run
+from src.run import EXIT_CRASHED, EXIT_OK, EXIT_PARTIAL, Run, write_problems
+from src.run import main as run_main
 from src.tracker import load_tracker, record_paper_classification, upsert_venue
 from src.tracker_schema import ExtractionFacts, TrackerFile, VenueTier
 from tests import render_fixtures as fx
@@ -81,7 +84,7 @@ class RunTestCase(unittest.TestCase):
         run.extract, run.classify, run.judge_fit = fakes.extract, fakes.classify, fakes.judge_fit
         run.tracker, run.tracker_path, run.profiles = self.tracker, self.path, self.profiles
         run.decisions, run.now, run.today = {}, fx.RUN_1, fx.RUN_1.date()
-        run.live, run.rechecked, run.failures = set(self.profiles), set(), []
+        run.live, run.rechecked, run.failures, run.crashed = set(self.profiles), set(), [], False
         return run, fakes
 
     def quiet(self, fn, *args, **kwargs):
@@ -202,6 +205,52 @@ class TestRecheck(RunTestCase):
         run, fakes = self.make_run({ECI_URL: facts()})
         self.quiet(run.recheck, self.profile, self.trace, set())
         self.assertEqual(fakes.calls, [])
+
+
+class TestExitCodes(RunTestCase):
+    def test_clean_run_exits_0(self):
+        run, _ = self.make_run({ECI_URL: facts()})
+        self.quiet(run.hand_off, self.profile, Candidate("ECI 2027", 2027, ECI_URL, None, "on_call_page", "r"), self.trace)
+        self.assertEqual(run.exit_code(), EXIT_OK)
+
+    def test_candidate_failure_is_partial(self):
+        run, _ = self.make_run({ECI_URL: facts()})
+        self.quiet(run.hand_off, self.profile, Candidate("Broken 2027", 2027, "https://broken.example/cfp", None, "on_call_page", "r"), self.trace)
+        self.assertEqual(run.exit_code(), EXIT_PARTIAL)
+
+    def test_profile_level_failure_is_a_crash(self):
+        run, _ = self.make_run({})
+        self.quiet(run.fail, self.trace, "discovery for immune-tolerance", RuntimeError("401 invalid x-api-key"), crash=True)
+        self.quiet(run.hand_off, self.profile, Candidate("Broken 2027", 2027, "https://broken.example/cfp", None, "on_call_page", "r"), self.trace)
+        self.assertEqual(run.exit_code(), EXIT_CRASHED)
+
+    def test_partial_and_crash_codes_differ_from_argparse_usage_error(self):
+        self.assertEqual(len({EXIT_OK, EXIT_CRASHED, EXIT_PARTIAL, 2}), 4)
+
+    def test_failures_are_error_annotations_on_actions(self):
+        run, _ = self.make_run({})
+        out = io.StringIO()
+        with mock.patch.dict("os.environ", {"GITHUB_ACTIONS": "true"}), contextlib.redirect_stdout(out), \
+                contextlib.redirect_stderr(io.StringIO()):
+            run.fail(self.trace, "re-check of eci-2027", TimeoutError("timed out"))
+        self.assertIn("::error title=Cicadas run::re-check of eci-2027 failed", out.getvalue())
+
+    def test_unreadable_decisions_crash_and_write_problems_file(self):
+        bad = Path(self._dir.name) / "decisions.json"
+        bad.write_text('{"eci-2027": "pending"}', encoding="utf-8")
+        problems = Path(self._dir.name) / "logs" / "run_problems.json"
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            code = run_main(["--tracker", str(self.path), "--decisions", str(bad), "--problems-out", str(problems)])
+        self.assertEqual(code, EXIT_CRASHED)
+        data = json.loads(problems.read_text(encoding="utf-8"))
+        self.assertTrue(data["crashed"])
+        self.assertIn("pending", data["problems"][0])
+
+    def test_write_problems_round_trips(self):
+        path = Path(self._dir.name) / "p.json"
+        write_problems(path, False, ["a failed", "b failed"])
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8")), {"crashed": False, "problems": ["a failed", "b failed"]})
 
 
 if __name__ == "__main__":

@@ -219,3 +219,6 @@ __marimo__/
 
 # Cicadas: per-run extraction traces (fetched page text, raw model responses)
 logs/
+
+# Cicadas: scratch tracker copies for local runs and demos (python -m src.scratch)
+scratch/

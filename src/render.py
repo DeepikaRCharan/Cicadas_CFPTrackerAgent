@@ -9,7 +9,9 @@ field, or fixed template wording: a null field renders as NOT_STATED, a
 rolling call as "Rolling". The only logic here is the selection and ordering
 the brief itself specifies -- unreported notifications, the Still open rule,
 "what pulled it down" (the lowest stored dimension score), the 14-day Also
-coming up window.
+coming up window. The one input that isn't a tracker field is the run's own
+failure list (`run_problems`, from src/run.py), rendered verbatim in a Run
+problems section at the bottom when the run only partly succeeded.
 
 Each render returns a RenderedEmail whose `receipt` lists what the email
 carried. Step 7 passes it to src/tracker.py's mark_sent only after the send
@@ -20,6 +22,7 @@ from __future__ import annotations
 
 import datetime
 import textwrap
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from src.profile_schema import Profile
@@ -383,10 +386,17 @@ def _section(title: str, lines: list[str], empty: str = NONE_THIS_MONTH) -> list
 # --- Public renders ---------------------------------------------------------
 
 
-def render_digest(tracker: TrackerFile, profiles: dict[str, Profile], today: datetime.date) -> RenderedEmail:
+def render_digest(
+    tracker: TrackerFile,
+    profiles: dict[str, Profile],
+    today: datetime.date,
+    run_problems: Sequence[str] = (),
+) -> RenderedEmail:
     """The monthly digest. `profiles` are the live profiles (id -> Profile):
     only they get a first-run snapshot or appear in Still open; swapped-out
-    profiles' entries are history."""
+    profiles' entries are history. `run_problems` (src/run.py's failures on
+    a partial run) adds a Run problems section at the bottom, and keeps a
+    quiet-month opener from reading as a clean run."""
     run_day = tracker.last_run.date() if tracker.last_run else today
     reports = unreported_notifications(tracker)
     digest_reports = [r for r in reports if r.entry.reason in DIGEST_REASONS]
@@ -397,15 +407,23 @@ def render_digest(tracker: TrackerFile, profiles: dict[str, Profile], today: dat
     snapshot_lines, snapshot_ids = _snapshot(tracker, profiles)
 
     lines = [f"Cicadas monthly digest: run of {_date_label(run_day)}", ""]
+    problems_note = (
+        f" Part of this run failed ({len(run_problems)} problem(s)), so something may have been missed: "
+        "see Run problems at the bottom."
+        if run_problems
+        else ""
+    )
     if not (new_groups or alert_groups or updates):
         lines += [
             _para(
                 f"Nothing new this month. Cicadas ran on {_date_label(run_day)} and found no "
-                "new fits, tier alerts or updates. Your still-open list is below.",
+                f"new fits, tier alerts or updates. Your still-open list is below.{problems_note}",
                 0,
             ),
             "",
         ]
+    elif run_problems:
+        lines += [_para(problems_note.strip(), 0), ""]
     lines += snapshot_lines
     lines += _section("New this month", _new_section(new_groups, profiles))
     lines += _section("Tier Alert", _tier_alert_section(alert_groups, profiles) if alert_groups else [])
@@ -413,6 +431,16 @@ def render_digest(tracker: TrackerFile, profiles: dict[str, Profile], today: dat
     lines += _section("Still open", _still_open_section(tracker, profiles, today), "Nothing open right now.")
     lines += _section("Needs a look", _needs_a_look_section(conflicts, profiles), "Nothing to check.")
     lines.append(_para(DECISIONS_FOOTER, 0))
+    if run_problems:
+        lines += [
+            "",
+            *_section("Run problems", [
+                _para("These parts of the run failed; everything else above is complete. "
+                      "Details are in the run's trace and the GitHub Actions log.", 0),
+                "",
+                *(_bullet(problem, 0) for problem in run_problems),
+            ])[:-1],
+        ]
 
     receipt = ReportReceipt(notifications=digest_reports, conflicts=conflicts, snapshot_profile_ids=snapshot_ids)
     return RenderedEmail(f"Cicadas monthly digest: {_date_label(run_day)}", "\n".join(lines) + "\n", receipt)

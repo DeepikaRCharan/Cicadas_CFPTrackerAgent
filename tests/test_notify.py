@@ -6,6 +6,7 @@ Run with: python -m unittest tests/test_notify.py -v
 
 import contextlib
 import io
+import json
 import sys
 import tempfile
 import unittest
@@ -171,6 +172,40 @@ class TestCommandLine(NotifyTestCase):
         code, _, err = self.run_main("--dry-run", "reminder", "no-such-conf-2027")
         self.assertEqual(code, 1)
         self.assertIn("no-such-conf-2027", err)
+
+
+class TestRunProblemsFile(TestCommandLine):
+    def problems_file(self, data):
+        path = Path(self._dir.name) / "run_problems.json"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        return str(path)
+
+    def test_partial_run_problems_rendered(self):
+        path = self.problems_file({"crashed": False, "problems": ["re-check of eci-2027 failed: TimeoutError"]})
+        code, out, _ = self.run_main("--dry-run", "digest", "--run-problems", path, env={})
+        self.assertEqual(code, 0)
+        self.assertIn("RUN PROBLEMS", out)
+        self.assertIn("re-check of eci-2027 failed", out)
+
+    def test_clean_run_file_adds_nothing(self):
+        path = self.problems_file({"crashed": False, "problems": []})
+        code, out, _ = self.run_main("--dry-run", "digest", "--run-problems", path, env={})
+        self.assertEqual(code, 0)
+        self.assertNotIn("RUN PROBLEMS", out)
+
+    def test_crashed_run_refuses_digest(self):
+        path = self.problems_file({"crashed": True, "problems": ["discovery for x failed"]})
+        with mock.patch.object(resend.Emails, "send") as send:
+            code, _, err = self.run_main("digest", "--run-problems", path)
+        self.assertEqual(code, 1)
+        self.assertIn("crashed", err)
+        send.assert_not_called()
+        self.assertEqual(self.path.read_bytes(), self.before)
+
+    def test_missing_problems_file_is_an_error(self):
+        code, _, err = self.run_main("--dry-run", "digest", "--run-problems", str(Path(self._dir.name) / "nope.json"))
+        self.assertEqual(code, 1)
+        self.assertIn("can't read run problems", err)
 
 
 if __name__ == "__main__":

@@ -17,16 +17,32 @@ scheduled run and an on-demand one:
     python -m src.run                                   # every live profile, tracker.json
     python -m src.run --profile immune-tolerance        # one profile
     python -m src.run --tracker /tmp/t.json --max-searches 4 --max-turns 6
+    python -m src.run --problems-out logs/run_problems.json   # what the workflow runs
 
-A failure on one candidate or re-check is a visible WARNING (and listed in
-the trace and the run summary); the run moves on. A failure that leaves the
-run unable to continue (tracker or decisions unreadable) exits 1.
+Exit codes (the monthly workflow branches on them):
+
+- 0 (EXIT_OK): everything ran.
+- 1 (EXIT_CRASHED): the run crashed outright -- tracker, decisions or
+  profiles unreadable, or a whole profile's classify/discovery failed. The
+  workflow skips the digest: a digest missing a whole paper's search would
+  look like a quiet month.
+- 3 (EXIT_PARTIAL): only some candidates or re-checks failed. The run keeps
+  going past each one (one bad page never throws away the others' work),
+  then exits 3; the workflow still sends the digest, with a "Run problems"
+  section listing each failure, and then fails the job. (2 is skipped
+  because argparse exits 2 on a usage error.)
+
+Every failure is a WARNING on stderr, an ::error:: annotation on GitHub
+Actions, and a line in the trace. --problems-out writes them as JSON for
+`python -m src.notify --run-problems` to render.
 """
 
 from __future__ import annotations
 
 import argparse
 import datetime
+import json
+import os
 import sys
 import traceback
 from pathlib import Path
@@ -53,6 +69,23 @@ from src.tracker import (
 from src.tracker_schema import Extraction, TrackerFile
 
 
+EXIT_OK = 0
+EXIT_CRASHED = 1
+EXIT_PARTIAL = 3
+
+
+def _annotate(message: str) -> None:
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        print(f"::error title=Cicadas run::{message}")
+
+
+def write_problems(path: str | Path, crashed: bool, problems: list[str]) -> None:
+    """The run's failures, for the digest's Run problems section."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"crashed": crashed, "problems": problems}, indent=2) + "\n", encoding="utf-8")
+
+
 def _fit_summary(fit_by_tier) -> str:
     if not fit_by_tier:
         return "not scored"
@@ -70,15 +103,28 @@ class Run:
         self.live = set(profiles)
         self.rechecked: set[str] = set()
         self.failures: list[str] = []
+        self.crashed = False
 
     def save(self) -> None:
         save_tracker(self.tracker, self.tracker_path)
 
-    def fail(self, trace: Trace, what: str, exc: Exception) -> None:
-        message = f"{what} failed: {type(exc).__name__}: {exc}"
+    def problem(self, message: str) -> None:
         warn(message)
-        trace.add(f"- **FAILED**: {message}")
+        _annotate(message)
         self.failures.append(message)
+
+    def fail(self, trace: Trace, what: str, exc: Exception, *, crash: bool = False) -> None:
+        """crash=True: a whole profile's classify/discovery failed (exit 1, no
+        digest). Otherwise one candidate or re-check (exit 3, digest sent)."""
+        message = f"{what} failed: {type(exc).__name__}: {exc}"
+        self.problem(message)
+        trace.add(f"- **FAILED**: {message}")
+        self.crashed = self.crashed or crash
+
+    def exit_code(self) -> int:
+        if self.crashed:
+            return EXIT_CRASHED
+        return EXIT_PARTIAL if self.failures else EXIT_OK
 
     def ensure_classified(self, profile: Profile) -> None:
         cached = self.tracker.profiles.get(profile.id)
@@ -141,8 +187,7 @@ class Run:
                 # reminder -- never resolved by picking one. Not merged.
                 message = (f"{label}: discovery found no deadline, but extraction reads the call as rolling -- "
                            f"not tracked; check {candidate.call_page_url} by hand")
-                warn(message)
-                self.failures.append(message)
+                self.problem(message)
                 trace.add(f"- outcome: **not tracked, needs a look**: {message}", "")
                 return
             if found.entry is not None:
@@ -251,6 +296,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--traces-dir", default=TRACES_DIR)
     parser.add_argument("--discovery-model", default=MODEL_DISCOVERY, choices=sorted(WEB_TOOL_TYPES),
                         help="model for the discovery loop only (hand-off models are unchanged)")
+    parser.add_argument("--problems-out", help="write the run's failures here as JSON (for notify --run-problems)")
     args = parser.parse_args(argv)
     load_dotenv()
 
@@ -268,7 +314,10 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError(f"unknown profile id(s): {unknown}; live: {sorted(profiles)}")
     except (TrackerError, DecisionsError, ValueError) as exc:
         print(f"[run] FAILED: {exc}", file=sys.stderr)
-        return 1
+        _annotate(str(exc))
+        if args.problems_out:
+            write_problems(args.problems_out, True, [str(exc)])
+        return EXIT_CRASHED
 
     tracker.last_run = now
     sync_decisions(tracker, decisions, set(profiles))
@@ -294,7 +343,7 @@ def main(argv: list[str] | None = None) -> int:
                 handed.add(lookup_venue(tracker, candidate.name, candidate.year, candidate.call_page_url).conference_id)
             run.recheck(profile, trace, skip_ids=handed)
         except Exception as exc:
-            run.fail(trace, f"discovery for {profile_id}", exc)
+            run.fail(trace, f"discovery for {profile_id}", exc, crash=True)
             traceback.print_exc()
         finally:
             trace.heading("Usage and cost")
@@ -308,7 +357,15 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[run] done: {len(tracker.conferences)} tracked venue(s), {len(run.failures)} failure(s) -> {tracker_path}")
     for line in _usage_lines():
         print(f"[run] {line[2:]}")
-    return 0
+    if args.problems_out:
+        write_problems(args.problems_out, run.crashed, run.failures)
+    code = run.exit_code()
+    if code == EXIT_CRASHED:
+        print("[run] CRASHED: a whole profile's classify or discovery failed -- no digest this run", file=sys.stderr)
+    elif code == EXIT_PARTIAL:
+        print(f"[run] PARTIAL: {len(run.failures)} candidate/re-check failure(s) -- digest goes out with a "
+              "Run problems section, and the job fails", file=sys.stderr)
+    return code
 
 
 if __name__ == "__main__":

@@ -12,6 +12,7 @@ the next email instead of being lost (brief, Guardrails > Visible failure).
     python -m src.notify reminder eci-2027             # week-before reminder for one conference
     python -m src.notify --dry-run digest              # print instead of sending; marks nothing
     python -m src.notify --tracker /tmp/t.json digest  # any tracker file, e.g. a test copy
+    python -m src.notify digest --run-problems logs/run_problems.json  # after a partial run (workflow)
 
 Not retried on failure: the next run (or a manual workflow_dispatch) is the
 retry, and nothing is lost in between because nothing was marked.
@@ -21,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import json
 import os
 import re
 import sys
@@ -104,6 +106,23 @@ def send_and_mark(
     return email_id
 
 
+def load_run_problems(path: str | Path) -> list[str]:
+    """src.run's --problems-out file. Missing or unreadable is an error, not
+    'no problems' -- and a crashed run's file refuses the digest outright
+    (the workflow skips it anyway; this is the backstop)."""
+    path = Path(path)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        crashed, problems = data["crashed"], data["problems"]
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise NotifyError(f"can't read run problems from {path}: {type(exc).__name__}: {exc}") from exc
+    if crashed:
+        raise NotifyError(f"{path} says the run crashed -- no digest for a crashed run")
+    if not isinstance(problems, list) or not all(isinstance(p, str) for p in problems):
+        raise NotifyError(f"{path}: 'problems' must be a list of strings")
+    return problems
+
+
 def _fail(message: str) -> int:
     print(f"[notify] FAILED: {message}", file=sys.stderr)
     if os.environ.get("GITHUB_ACTIONS") == "true":
@@ -116,7 +135,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--tracker", default=TRACKER_PATH, help="tracker file to render from and mark (default: tracker.json)")
     parser.add_argument("--dry-run", action="store_true", help="print the email instead of sending it; marks nothing")
     kinds = parser.add_subparsers(dest="kind", required=True)
-    kinds.add_parser("digest", help="the monthly digest")
+    digest = kinds.add_parser("digest", help="the monthly digest")
+    digest.add_argument("--run-problems", metavar="PATH",
+                        help="src.run's --problems-out file; its failures go in a Run problems section")
     reminder = kinds.add_parser("reminder", help="the week-before reminder for one conference")
     reminder.add_argument("conference_id")
     args = parser.parse_args(argv)
@@ -127,10 +148,11 @@ def main(argv: list[str] | None = None) -> int:
         tracker = load_tracker(args.tracker)
         profiles = load_live_profiles()
         if args.kind == "digest":
-            email = render_digest(tracker, profiles, today)
+            problems = load_run_problems(args.run_problems) if args.run_problems else []
+            email = render_digest(tracker, profiles, today, problems)
         else:
             email = render_week_before(tracker, args.conference_id, profiles, today)
-    except (TrackerError, ValueError, KeyError) as exc:
+    except (TrackerError, ValueError, KeyError, NotifyError) as exc:
         return _fail(str(exc))
 
     receipt = email.receipt

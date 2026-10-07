@@ -191,5 +191,30 @@ class TestWeekBefore(unittest.TestCase):
         self.assertNotIn("Policy Forum", also)  # deadline passed, and below threshold
 
 
+class TestRunProblems(unittest.TestCase):
+    PROBLEMS = ["hand-off of Broken 2027 (2027) failed: RuntimeError: failed to fetch: HTTP 403",
+                "re-check of eci-2027 failed: TimeoutError: timed out"]
+
+    def render(self, problems):
+        return render_digest(FINAL_TRACKER, fx.load_profiles(), datetime.date(2026, 12, 7), problems)
+
+    def test_clean_run_has_no_run_problems_section(self):
+        self.assertNotIn("RUN PROBLEMS", self.render([]).body)
+        self.assertEqual(self.render([]).body, QUIET.body)
+
+    def test_problems_listed_in_last_section(self):
+        body = self.render(self.PROBLEMS).body
+        content = section(body, "Run problems")
+        for problem in self.PROBLEMS:
+            self.assertIn(problem.split(":")[0], content)
+        self.assertTrue(body.rstrip().endswith("timed out"))
+        self.assertGreater(body.index("RUN PROBLEMS"), body.index("NEEDS A LOOK"))
+
+    def test_quiet_month_opener_does_not_read_as_clean(self):
+        body = self.render(self.PROBLEMS).body
+        self.assertIn("Nothing new this month.", body)
+        self.assertIn("Part of this run failed (2 problem(s))", " ".join(body.split("=" * 76)[0].split()))
+
+
 if __name__ == "__main__":
     unittest.main()

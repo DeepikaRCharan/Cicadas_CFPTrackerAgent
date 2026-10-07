@@ -1,0 +1,80 @@
+# Cicadas daily deadline watcher: decisions sync, closure, week-before
+# reminders. No LLM and no web search -- this job doesn't even receive
+# ANTHROPIC_API_KEY. Brief: Deadline watcher and closure.
+#
+# Pause: Actions tab > "Daily deadline watcher" > ... > Disable workflow.
+# Nothing else needs to change; on re-enabling, closures catch up and a
+# reminder whose window is still open goes out late rather than never.
+#
+# A day with nothing due changes nothing and makes no commit. Silence is
+# normal here (no email unless a reminder is due), so a failure shows as a
+# red run and GitHub's failed-run email.
+
+name: Daily deadline watcher
+
+on:
+  schedule:
+    # Every day, 12:17 UTC = 7:17 a.m. CDT / 6:17 a.m. CST -- two hours
+    # before the monthly run's hour, on the 7th.
+    - cron: "17 12 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write # push tracker.json back with the built-in GITHUB_TOKEN
+
+concurrency:
+  group: cicadas-tracker # shared with the monthly run: never two tracker writers at once
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Unit tests (no API calls)
+        run: python -m unittest discover -s tests
+
+      - name: Check secrets
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          NOTIFY_TO: ${{ secrets.NOTIFY_TO }}
+        run: |
+          missing=""
+          for name in RESEND_API_KEY NOTIFY_TO; do
+            [ -n "${!name}" ] || missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error title=Cicadas secrets::Missing repository secret(s):$missing -- add under Settings > Secrets and variables > Actions"
+            exit 1
+          fi
+
+      - name: Deadline watcher
+        id: watch
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          NOTIFY_TO: ${{ secrets.NOTIFY_TO }}
+        run: python -m src.watch
+
+      - name: Commit tracker
+        if: ${{ !cancelled() && steps.watch.outcome != 'skipped' }}
+        run: |
+          git add tracker.json
+          if git diff --cached --quiet; then
+            echo "No changes -- nothing to commit"
+            exit 0
+          fi
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -m "Deadline watcher $(date -u +%Y-%m-%d)"
+          git pull --rebase origin "$GITHUB_REF_NAME"
+          git push origin "HEAD:$GITHUB_REF_NAME"
