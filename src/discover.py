@@ -42,6 +42,7 @@ from __future__ import annotations
 import datetime
 import html
 import json
+import re
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -79,6 +80,7 @@ BUCKET_LABELS = {
     VenueTier.OTHER_AVENUES: "Other Avenues",
 }
 RESULT_VERDICTS = ["live_cfp", "stale", "aggregator", "not_a_call", "irrelevant"]
+MAX_ACCEPT_REFUSALS = 2  # per candidate call page: then recorded as refused, not retried
 DEADLINE_EVIDENCE = ["on_call_page", "on_dates_page", "rolling", "not_found"]
 # A fetched page with less text than this (a JavaScript shell, a cookie wall)
 # is not evidence of anything.
@@ -215,14 +217,41 @@ def page_key(url: str) -> str:
     return normalize_url(url).lower()
 
 
-def _squash(text: str) -> str:
+_MD_LINK = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")  # [text](url), ![alt](src) -> text
+_MD_REF_LINK = re.compile(r"\[([^\]]*)\]\[[^\]]*\]")  # [text][ref] -> text
+_AUTOLINK = re.compile(r"<(?:https?://|mailto:)[^>\s]*>")
+_HTML_TAG = re.compile(r"</?[a-zA-Z][^>]*>")
+_QUOTES = str.maketrans({c: "'" for c in "\u2018\u2019\u201a\u201b\u2032\u00b4"}
+                        | {c: '"' for c in "\u201c\u201d\u201e\u201f\u2033\u00ab\u00bb"})
+_DASHES = str.maketrans({c: "-" for c in "\u2010\u2011\u2012\u2013\u2014\u2015\u2212\ufe58\ufe63\uff0d"})
+
+
+def normalize_for_quote(text: str) -> str:
+    """The same text with formatting differences removed, applied to both the
+    quote and the page: link and HTML markup stripped to their visible text,
+    markdown emphasis/heading markers dropped, curly quotes and every dash
+    unified, whitespace collapsed, lowercase. Only formatting goes -- the
+    words themselves are untouched."""
+    text = html.unescape(text)
+    text = _MD_LINK.sub(r"\1", text)
+    text = _MD_REF_LINK.sub(r"\1", text)
+    text = _AUTOLINK.sub(" ", text)
+    text = _HTML_TAG.sub(" ", text)
+    text = text.translate(_QUOTES).translate(_DASHES)
+    text = re.sub(r"[*_`#>]+", " ", text)
     return " ".join(text.split()).lower()
 
 
 def quote_found(quote: str, page_text: str) -> bool:
-    """Whether `quote` appears in `page_text`, ignoring whitespace and case."""
-    q = _squash(quote)
-    return bool(q) and q in _squash(page_text)
+    """Whether `quote`'s words appear, whole, in order and contiguous, in
+    `page_text`, after normalize_for_quote on both -- formatting differences
+    (link markup, curly quotes, dashes, spacing) never block a real quote,
+    and a quote whose words aren't on the page still fails."""
+    q = normalize_for_quote(quote)
+    if not q:
+        return False
+    # whole words only: "7 oct" must not match inside "7 october"
+    return re.search(r"(?<!\w)" + re.escape(q) + r"(?!\w)", normalize_for_quote(page_text)) is not None
 
 
 def fetched_page(result_content) -> tuple[bool, str | None, int]:
@@ -672,6 +701,11 @@ class _State:
     # just before a decision-tool call gets its result at the start of the
     # next response, not the same one. id -> (tool name, input).
     pending_calls: dict[str, tuple[str, dict]] = field(default_factory=dict)
+    # accept_candidate refusals per call page (page_key); at MAX_ACCEPT_REFUSALS
+    # the candidate is recorded as refused and not evaluated again.
+    accept_refusals: Counter = field(default_factory=Counter)
+    log_dir: Path | None = None  # where each web_fetch's page text is saved
+    fetch_logs: int = 0
 
     def start_phase(self, phase: str, search_cap: int) -> None:
         self.phase, self.phase_search_cap, self.phase_searches = phase, search_cap, 0
@@ -767,7 +801,9 @@ def _count_usage(state: _State, response) -> None:
         if name == "web_search" and isinstance(result.content, list):
             ok_searches += 1
             state.queries.append(inp.get("query", ""))
-        elif name == "web_fetch" and getattr(result.content, "type", "") == "web_fetch_result":
+        elif name == "web_fetch":
+            _log_fetch(state, inp.get("url", "?"), result.content)
+        if name == "web_fetch" and getattr(result.content, "type", "") == "web_fetch_result":
             ok_fetches += 1
             readable, text, _ = fetched_page(result.content)
             for url in {u for u in (inp.get("url"), getattr(result.content, "url", None)) if u}:
@@ -803,6 +839,30 @@ def _count_usage(state: _State, response) -> None:
         state.cost += turn_cost
         state.max_turn_cost = max(state.max_turn_cost, turn_cost)
         state.context_tokens += (getattr(usage, "input_tokens", 0) or 0) + (getattr(usage, "cache_creation_input_tokens", 0) or 0)
+
+
+def _log_fetch(state: _State, url: str, content) -> None:
+    """Save what one web_fetch in the loop returned to logs/: the page text
+    exactly as the model saw it (what deadline quotes are checked against),
+    or the error. One file per fetch."""
+    if state.log_dir is None:
+        return
+    state.fetch_logs += 1
+    slug = re.sub(r"[^a-z0-9]+", "-", normalize_url(url).lower()).strip("-")[:60] or "page"
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    path = Path(state.log_dir) / f"{stamp}_loop_fetch_{state.fetch_logs:02d}_{slug}.txt"
+    if getattr(content, "type", "") == "web_fetch_result":
+        readable, text, chars = fetched_page(content)
+        body = text if text is not None else ("(PDF -- read by the model, no plain text kept)" if readable
+                                               else getattr(getattr(getattr(content, "content", None), "source", None), "data", "") or "")
+        head = f"URL requested: {url}\nURL fetched: {content.url}\nReadable: {readable} ({chars} characters)\n"
+    else:
+        body, head = "", f"URL requested: {url}\nFetch error: {getattr(content, 'error_code', content)}\n"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(head + "\n" + body, encoding="utf-8")
+    except OSError as exc:  # a log that can't be written never stops discovery, but says so
+        print(f"[discover] WARNING: couldn't save fetched page text to {path}: {exc}")
 
 
 def _project_next_turn(state: _State) -> float:
@@ -842,13 +902,22 @@ class _Handlers:
     def run(self, block) -> dict:
         args = block.input if isinstance(block.input, dict) else {}
         handler = getattr(self, f"_{block.name}", None)
+        page = page_key(str(args.get("call_page_url", ""))) if block.name == "accept_candidate" else None
         if handler is None:
             reply, refused = f"unknown tool {block.name!r}", True
+        elif page is not None and self.state.accept_refusals[page] >= MAX_ACCEPT_REFUSALS:
+            reply, refused = (f"not accepted: this call page was already refused {MAX_ACCEPT_REFUSALS} times and is "
+                              "recorded as refused -- not evaluated again; move on to other leads"), True
         else:
             try:
                 reply, refused = handler(args)
             except (KeyError, TypeError, ValueError) as exc:
                 reply, refused = f"bad arguments: {exc}", True
+            if page is not None and refused:
+                self.state.accept_refusals[page] += 1
+                if self.state.accept_refusals[page] == MAX_ACCEPT_REFUSALS:
+                    reply += (f" -- refused {MAX_ACCEPT_REFUSALS} times: recorded as refused, and further attempts "
+                              "on this call page won't be evaluated")
         self.trace.decision(block.id, block.name, args, reply, refused)
         first_line = reply.split("\n")[0]
         if block.name == "record_result":
@@ -881,6 +950,12 @@ class _Handlers:
 
     def _tracker_status(self, name, year, url) -> tuple[str, str]:
         found = lookup_venue(self.tracker, name, year, url)
+        status, detail = self._tracker_status_of(found)
+        if found.alias is not None:
+            detail += f" (tracked as {found.entry.name!r}: same URL and year, so the same venue; this name is kept as an alias)"
+        return status, detail
+
+    def _tracker_status_of(self, found) -> tuple[str, str]:
         if found.conflict is not None:
             return "conflict", (
                 f"clashes with tracked {found.entry.id!r} at {found.entry.url} ({found.conflict.value}); "
@@ -1046,6 +1121,7 @@ def discover(
     limits: Limits | None = None,
     model: str = MODEL_DISCOVERY,
     call=None,
+    log_dir: str | Path | None = None,
 ) -> DiscoveryResult:
     """Run discovery for one profile: the probe phase, then the main phase.
     Reads the tracker (for check_tracker) but never writes it. `call` is
@@ -1056,7 +1132,7 @@ def discover(
     main, probes = build_queries(profile, classification, today)
     if model not in WEB_TOOL_TYPES:
         raise ValueError(f"no web tool versions configured for {model!r} (config.WEB_TOOL_TYPES)")
-    state = _State(limits=limits, probes=probes, model=model)
+    state = _State(limits=limits, probes=probes, model=model, log_dir=Path(log_dir) if log_dir else None)
     handlers = _Handlers(state, tracker, profile.id, trace, today)
     probe_searches = min(len(probes), limits.probe_reserve, limits.searches)
 

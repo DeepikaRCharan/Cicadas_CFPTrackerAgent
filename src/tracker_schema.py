@@ -364,7 +364,7 @@ class NotificationEntry(StrictModel):
 
 class IdentityConflictReason(str, Enum):
     SAME_ID_DIFFERENT_URL = "same_id_different_url"
-    SAME_URL_SAME_YEAR_DIFFERENT_NAME = "same_url_same_year_different_name"
+    SAME_URL_SAME_YEAR_DIFFERENT_NAME = "same_url_same_year_different_name"  # no longer produced: same URL + year is the same venue, its new name an alias
 
 
 class IdentityConflict(StrictModel):
@@ -473,6 +473,10 @@ class ConferenceEntry(StrictModel):
     dates_url: str | None = Field(
         None,
         description="The venue's separate 'important dates' page, when the deadline is stated there rather than on the call page. Re-fetched alongside url on every re-check.",
+    )
+    aliases: list[str] = Field(
+        default_factory=list,
+        description="Other names this venue was found under (same normalized URL and year, different name). Identity stays with `id`; aliases are history.",
     )
     first_seen: datetime
     last_checked: datetime

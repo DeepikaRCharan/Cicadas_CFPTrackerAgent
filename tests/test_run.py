@@ -393,5 +393,23 @@ class TestCallStatusInTheRun(RunTestCase):
         self.assertIn("has already passed", skip_reason(month, datetime.date(2027, 5, 1)))
 
 
+class TestHandOffAlias(RunTestCase):
+    def test_name_variant_merges_into_the_tracked_venue(self):
+        run, _ = self.make_run({ECI_URL: facts()})
+        self.quiet(run.hand_off, self.profile, Candidate("ECI 2027", 2027, ECI_URL, None, "on_call_page", "r"), self.trace)
+        tracker = load_tracker(self.path)
+        tracker.conferences[0].matches.clear()  # as if tracked without a match for this paper (e.g. not scored)
+        save_tracker(tracker, self.path)
+        self.tracker = load_tracker(self.path)
+        run, fakes = self.make_run({ECI_URL: facts()})
+        outcome = self.quiet(run.hand_off, self.profile,
+                             Candidate("European Congress of Immunology 2027", 2027, ECI_URL, None, "on_call_page", "r"), self.trace)
+        self.assertEqual(outcome, "updated")
+        saved = load_tracker(self.path)
+        self.assertEqual(([c.id for c in saved.conferences], saved.identity_conflicts), (["eci-2027"], []))
+        self.assertEqual(saved.conferences[0].aliases, ["European Congress of Immunology 2027"])
+        self.assertNotIn("classify", [c[0] for c in fakes.calls])  # the tracked venue's buckets are reused
+
+
 if __name__ == "__main__":
     unittest.main()

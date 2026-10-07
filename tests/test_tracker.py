@@ -209,13 +209,13 @@ class TestIdentity(TrackerTestCase):
             tracker, _, _ = self.run_once(RUN_2 + datetime.timedelta(days=1), [self.eci(url=other_url)])
         self.assertEqual(len(tracker.identity_conflicts), 1)
 
-    def test_same_url_same_year_different_name_is_flagged(self):
+    def test_same_url_same_year_different_name_is_the_same_venue(self):
+        # was a conflict before step 9's identity fix; now merged, the name kept as an alias
         self.run_once(RUN_1, [self.eci()])
-        with contextlib.redirect_stderr(io.StringIO()):
-            tracker, results, _ = self.run_once(RUN_2, [self.eci(name="European Congress of Immunology 2027")])
-        self.assertEqual(results[0].status, "flagged")
+        tracker, results, _ = self.run_once(RUN_2, [self.eci(name="European Congress of Immunology 2027")])
+        self.assertEqual(results[0].status, "updated")
         self.assertEqual(len(tracker.conferences), 1)
-        self.assertEqual(tracker.identity_conflicts[0].reason.value, "same_url_same_year_different_name")
+        self.assertEqual(tracker.identity_conflicts, [])
 
 
 class TestDecisionsSync(TrackerTestCase):
@@ -446,6 +446,44 @@ class TestCallStatusByCode(unittest.TestCase):
         f = self.facts()
         self.assertFalse(deadline_passed(f, datetime.date(2027, 3, 31)))
         self.assertTrue(deadline_passed(f, datetime.date(2027, 4, 1)))
+
+
+class TestIdentityAliases(TrackerTestCase):
+    """Same normalized URL + same year = the same venue, whatever its name."""
+
+    def test_name_variant_merges_and_is_kept_as_alias(self):
+        self.run_once(RUN_1, [self.eci()])
+        tracker, results, _ = self.run_once(RUN_2, [self.eci(name="European Congress of Immunology 2027")])
+        self.assertEqual((results[0].status, results[0].conference_id), ("updated", "eci-2027"))
+        self.assertEqual(len(tracker.conferences), 1)
+        self.assertEqual(tracker.identity_conflicts, [])
+        self.assertEqual(tracker.conferences[0].aliases, ["European Congress of Immunology 2027"])
+
+    def test_alias_recorded_once_and_never_the_tracked_name(self):
+        self.run_once(RUN_1, [self.eci()])
+        self.run_once(RUN_2, [self.eci(name="European Congress of Immunology 2027")])
+        tracker, _, _ = self.run_once(RUN_2, [self.eci(name="EUROPEAN CONGRESS of Immunology (2027)"), self.eci()])
+        self.assertEqual(tracker.conferences[0].aliases, ["European Congress of Immunology 2027"])
+
+    def test_url_variant_with_same_year_still_the_same_venue(self):
+        self.run_once(RUN_1, [self.eci()])
+        tracker, results, _ = self.run_once(RUN_2, [self.eci(name="ECI Congress 2027", url="https://www.ECI2027.org/call-for-abstracts")])
+        self.assertEqual(results[0].status, "updated")
+        self.assertEqual(tracker.identity_conflicts, [])
+
+    def test_same_name_different_url_is_still_a_conflict(self):
+        self.run_once(RUN_1, [self.eci()])
+        with contextlib.redirect_stderr(io.StringIO()):
+            tracker, results, _ = self.run_once(RUN_2, [self.eci(url="https://easychair.org/cfp/ECI2027")])
+        self.assertEqual(results[0].status, "flagged")
+        self.assertEqual(tracker.identity_conflicts[0].reason.value, "same_id_different_url")
+
+    def test_same_url_different_year_is_a_new_venue_not_an_alias(self):
+        self.run_once(RUN_1, [self.eci()])
+        tracker, results, _ = self.run_once(RUN_2, [self.eci(name="ECI 2029", year=2029)])
+        self.assertEqual(results[0].status, "created")
+        self.assertEqual(sorted(c.id for c in tracker.conferences), ["eci-2027", "eci-2029"])
+        self.assertEqual(tracker.conferences[0].aliases, [])
 
 
 if __name__ == "__main__":

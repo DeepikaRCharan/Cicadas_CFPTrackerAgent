@@ -56,7 +56,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from src.config import DECISIONS_PATH, MODEL_DISCOVERY, TRACES_DIR, TRACKER_PATH, WEB_TOOL_TYPES
+from src.config import DECISIONS_PATH, LOGS_DIR, MODEL_DISCOVERY, TRACES_DIR, TRACKER_PATH, WEB_TOOL_TYPES
 from src.discover import BUCKET_LABELS, Candidate, Limits, Trace, discover, page_key
 from src.profile_schema import Profile, load_live_profiles
 from src.tracker import (
@@ -455,7 +455,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             run.ensure_classified(profile)
             result = discover(profile, tracker.profiles[profile_id], tracker, trace=trace, today=run.today,
-                              limits=limits, model=args.discovery_model)
+                              limits=limits, model=args.discovery_model, log_dir=LOGS_DIR)
             judged = result.judged
             trace.heading("Hand-off: extract, classify, judge fit, merge")
             if not result.candidates:

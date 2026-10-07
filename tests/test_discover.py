@@ -15,7 +15,7 @@ from types import SimpleNamespace as NS
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.discover import Limits, Trace, build_queries, discover, probe_covered
+from src.discover import Limits, Trace, build_queries, discover, normalize_for_quote, probe_covered, quote_found
 from src.tracker import record_paper_classification, upsert_venue
 from src.tracker_schema import TrackerFile, VenueTier
 from tests import render_fixtures as fx
@@ -777,6 +777,118 @@ class TestTrackedClosedByDeadline(DiscoverTestCase):
     def test_deadline_passed_is_closed(self):
         self.seed_other_paper(datetime.date(2026, 9, 30), "30 September 2026")
         self.assertIn("code: tracked_closed", self.check())
+
+
+SER_URL = "https://ser2027.org/call-for-proposals/"
+SER_FIXTURE = (Path(__file__).resolve().parent / "fixtures" / "ser2027_call_page.txt").read_text(encoding="utf-8")
+SER_QUOTE = ("All proposals must be submitted through the conference submission portal and must be received "
+             "no later than 7 October 2026 at 23:59:59 UTC.")
+# the same sentence as a fetch tool may render it: a markdown link in the middle, emphasis, a non-breaking space
+SER_FETCHED = ("## Proposal Submission Guidelines\n\nAll proposals must be submitted through the "
+               "[conference submission portal](https://ser2027.org/portal/) and must be received\nno later than "
+               "**7 October 2026** at 23:59:59 UTC. Early submissions are highly encouraged. ") * 3
+
+
+class TestQuoteVerification(unittest.TestCase):
+    def test_long_quote_found_on_the_saved_ser2027_page(self):
+        self.assertTrue(quote_found(SER_QUOTE, SER_FIXTURE))
+        longer = SER_QUOTE + " Early submissions are highly encouraged, and reviews will be conducted on a rolling basis."
+        self.assertTrue(quote_found(longer, SER_FIXTURE))
+
+    def test_link_in_the_middle_of_the_sentence_does_not_block_it(self):
+        self.assertTrue(quote_found(SER_QUOTE, SER_FETCHED))
+        self.assertTrue(quote_found(SER_QUOTE, SER_FETCHED.replace(
+            "[conference submission portal](https://ser2027.org/portal/)",
+            '<a href="https://ser2027.org/portal/">conference submission portal</a>')))
+
+    def test_quotes_dashes_and_spacing_unified(self):
+        page = "Abstracts due “no later than” 31 March 2027 – 23:59 CET"
+        self.assertTrue(quote_found('Abstracts due "no later than" 31 March 2027 - 23:59 CET', page))
+        self.assertTrue(quote_found("abstracts  due “no later than”\n31 march 2027 — 23:59 cet", page))
+
+    def test_words_must_still_be_on_the_page(self):
+        self.assertFalse(quote_found(SER_QUOTE.replace("7 October", "8 October"), SER_FETCHED))
+        self.assertFalse(quote_found("must be received no later than 7 Oct", SER_FETCHED))  # whole words only
+        self.assertFalse(quote_found("submitted through the portal and must be received", SER_FETCHED))  # words dropped
+        self.assertFalse(quote_found("", SER_FETCHED))
+        self.assertFalse(quote_found("**  **", SER_FETCHED))
+
+    def test_normalize_keeps_the_words(self):
+        self.assertEqual(normalize_for_quote("See [the  `portal`](https://x.org) – **now**"), "see the portal - now")
+
+
+class TestQuoteInTheLoop(DiscoverTestCase):
+    def test_accepts_the_full_sentence_against_a_page_with_link_markup(self):
+        ser = dict(name="SER2027", year=2027, call_page_url=SER_URL, dates_page_url=None,
+                   deadline_evidence="on_call_page", deadline_quote=SER_QUOTE, reason="open symposium call")
+        api = FakeAPI(response(fetch(SER_URL, page=SER_FETCHED), tool("accept_candidate", "a1", **ser)), finish("done"))
+        result = self.run_loop(api, Limits(**SINGLE_PHASE))
+        self.assertEqual([c.name for c in result.candidates], ["SER2027"])
+
+
+class TestAcceptRefusalCap(DiscoverTestCase):
+    def test_two_refusals_then_recorded_and_not_evaluated_again(self):
+        bad = dict(ECI, deadline_quote="Deadline: 1 April 2027")
+        good = dict(ECI)  # would pass -- but the candidate is already recorded as refused
+        api = FakeAPI(response(fetch(ECI["call_page_url"]), tool("accept_candidate", "a1", **bad)),
+                      response(tool("accept_candidate", "a2", **bad)),
+                      response(tool("accept_candidate", "a3", **good)),
+                      finish("done"))
+        result = self.run_loop(api, Limits(**SINGLE_PHASE))
+        self.assertEqual(result.candidates, [])
+        text = self.turns_text()
+        self.assertEqual(text.count("does not appear on"), 2)
+        self.assertIn("refused 2 times: recorded as refused, and further attempts on this call page won't be evaluated", text)
+        self.assertIn("already refused 2 times and is recorded as refused -- not evaluated again", text)
+        self.assertEqual([j.outcome for j in result.judged], ["refused", "refused", "refused"])
+
+    def test_refusals_counted_per_call_page(self):
+        other = dict(ECI, call_page_url="https://other.org/cfp", name="Other 2027", deadline_quote="nope")
+        api = FakeAPI(response(fetch(ECI["call_page_url"]), fetch("https://other.org/cfp", sid="f2"),
+                               tool("accept_candidate", "a1", **dict(ECI, deadline_quote="nope")),
+                               tool("accept_candidate", "a2", **other),
+                               tool("accept_candidate", "a3", **ECI)),
+                      finish("done"))
+        result = self.run_loop(api, Limits(**SINGLE_PHASE))
+        self.assertEqual([c.name for c in result.candidates], ["ECI 2027"])  # one refusal for ECI: still evaluated
+
+
+class TestFetchLogs(DiscoverTestCase):
+    def test_every_loop_fetch_saved_with_its_page_text(self):
+        with tempfile.TemporaryDirectory() as d:
+            api = FakeAPI(response(fetch(SER_URL, page=SER_FETCHED), fetch("https://x.org/gone", sid="f2"),
+                                   tool("check_tracker", "c1", name="SER2027", year=2027, url=SER_URL)),
+                          finish("done"))
+            api.responses[0].content[3].content = NS(type="web_fetch_tool_result_error", error_code="url_not_accessible")
+            with contextlib.redirect_stdout(io.StringIO()):
+                discover(self.profile, self.classification, self.tracker, trace=self.trace, today=TODAY,
+                         limits=Limits(**SINGLE_PHASE), call=api, log_dir=d)
+            files = sorted(Path(d).glob("*_loop_fetch_*.txt"))
+            self.assertEqual(len(files), 2)
+            first = files[0].read_text(encoding="utf-8")
+            self.assertIn(f"URL requested: {SER_URL}", first)
+            self.assertIn("[conference submission portal](https://ser2027.org/portal/)", first)  # as the model saw it
+            self.assertIn("Fetch error: url_not_accessible", files[1].read_text(encoding="utf-8"))
+
+    def test_no_log_dir_writes_nothing(self):
+        logs = Path(__file__).resolve().parent.parent / "logs"
+        before = set(logs.glob("*_loop_fetch_*")) if logs.exists() else set()
+        api = FakeAPI(response(fetch(SER_URL), tool("finish", "f1", reason="done")))
+        self.run_loop(api, Limits(**SINGLE_PHASE))  # log_dir defaults to None
+        after = set(logs.glob("*_loop_fetch_*")) if logs.exists() else set()
+        self.assertEqual(after, before)
+
+
+class TestCheckTrackerAlias(DiscoverTestCase):
+    def test_name_variant_is_the_tracked_venue_not_a_conflict(self):
+        self.seed_eci()
+        api = FakeAPI(response(tool("check_tracker", "c1", name="European Congress of Immunology", year=2027,
+                                    url=ECI["call_page_url"])), finish("done"))
+        self.run_loop(api, Limits(**SINGLE_PHASE))
+        text = self.turns_text()
+        self.assertIn("code: tracked_open", text)
+        self.assertIn("same URL and year, so the same venue; this name is kept as an alias", text)
+        self.assertNotIn("conflict", text)
 
 
 if __name__ == "__main__":

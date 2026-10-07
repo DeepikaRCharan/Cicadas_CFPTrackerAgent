@@ -5,13 +5,14 @@ Build step 5 (docs/project-brief.md, "Build order"). No LLM calls here -- this
 module only moves already-validated shapes (src/tracker_schema.py) in and
 out of tracker.json, so every rule below is plain code:
 
-- **Identity** (brief, Rules > Identity). `id` = normalized name + year; the
-  URL is a secondary check, never the key, and the domain alone is never
-  used. A candidate is merged into an existing entry only when id *and*
-  normalized URL both agree. Same id but different URL, or same URL and year
-  but a different name, is recorded in `identity_conflicts` and logged as a
-  WARNING -- never merged, never created as a second entry. Same URL but a
-  different year is a new venue (sites reuse one CFP page every year).
+- **Identity** (brief, Rules > Identity). `id` = normalized name + year,
+  and the domain alone is never used. The same normalized URL and the same
+  year is the same venue, whatever it's called: a different name is merged
+  and kept in `aliases`. A conflict is flagged only when the URL or the year
+  differs -- same id but a different URL is recorded in `identity_conflicts`
+  and logged as a WARNING, never merged, never created as a second entry.
+  Same URL but a different year is a new venue (sites reuse one CFP page
+  every year).
 - **decisions.json** is read, never written. A bad value or a duplicate key
   stops the run with an error naming the line. An id that isn't tracked is a
   WARNING in the run log and the run continues. Decisions are copied into
@@ -373,27 +374,33 @@ class VenueLookup:
     conference_id: str
     entry: ConferenceEntry | None
     conflict: IdentityConflictReason | None = None
+    alias: str | None = None  # the candidate's name, when it matched by URL + year under a different name
 
 
 def lookup_venue(tracker: TrackerFile, name: str, year: int | None, url: str) -> VenueLookup:
-    """The identity rules (brief, Rules > Identity), read-only: tracked only
-    when id and normalized URL both agree; same id/different URL, or same
-    URL and year/different name, is a conflict; same URL with a different
-    year is a new venue."""
+    """The identity rules (brief, Rules > Identity), read-only: the same
+    normalized URL and year is the same venue whatever its name (a different
+    name comes back as `alias`); same id but a different URL is a conflict;
+    same URL with a different year is a new venue."""
     candidate_id = make_id(name, year)
     candidate_url = normalize_url(url)
-    entry = next((c for c in tracker.conferences if c.id == candidate_id), None)
-    if entry is not None:
-        if normalize_url(entry.url) != candidate_url:
-            return VenueLookup(candidate_id, entry, IdentityConflictReason.SAME_ID_DIFFERENT_URL)
-        return VenueLookup(candidate_id, entry)
-    clash = next(
+    same = next(
         (c for c in tracker.conferences if normalize_url(c.url) == candidate_url and id_year(c.id) == year),
         None,
     )
-    if clash is not None:
-        return VenueLookup(candidate_id, clash, IdentityConflictReason.SAME_URL_SAME_YEAR_DIFFERENT_NAME)
+    if same is not None:
+        return VenueLookup(same.id, same, alias=None if same.id == candidate_id else name)
+    entry = next((c for c in tracker.conferences if c.id == candidate_id), None)
+    if entry is not None:  # same id, so same year -- and the URL differs, or `same` would have matched
+        return VenueLookup(candidate_id, entry, IdentityConflictReason.SAME_ID_DIFFERENT_URL)
     return VenueLookup(candidate_id, None)
+
+
+def _add_alias(entry: ConferenceEntry, name: str) -> None:
+    known = {normalize_name(entry.name), *(normalize_name(a) for a in entry.aliases)}
+    if normalize_name(name) not in known:
+        entry.aliases.append(name)
+        print(f"[tracker] {entry.id}: also found as {name!r} (same URL and year) -- kept as an alias")
 
 
 def flag_conflict(
@@ -459,6 +466,8 @@ def upsert_venue(
         print(f"[tracker] created {candidate_id} ({url})")
     else:
         status = "updated"
+        if found.alias is not None:
+            _add_alias(entry, found.alias)
         old = entry.extraction
         facts = extraction.model_dump(exclude={"venue_tier", "venue_tier_reasoning"})
         new = Extraction(**facts, venue_tier=old.venue_tier, venue_tier_reasoning=old.venue_tier_reasoning)

@@ -51,6 +51,10 @@ WEB_TOOL_TYPES = {
     "claude-haiku-4-5-20251001": ("web_search_20250305", "web_fetch_20250910"),
 }
 
+# Run logs (gitignored; uploaded as the workflow artifact): extraction's page
+# text and model responses, and the search loop's fetched page text.
+LOGS_DIR = "logs"
+
 # Where each run's readable decision trace is written (committed, unlike logs/).
 TRACES_DIR = "traces"
 
