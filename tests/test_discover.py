@@ -895,7 +895,7 @@ class TestCheckTrackerAlias(DiscoverTestCase):
         self.run_loop(api, Limits(**SINGLE_PHASE))
         text = self.turns_text()
         self.assertIn("code: tracked_open", text)
-        self.assertIn("same URL and year, so the same venue; this name is kept as an alias", text)
+        self.assertIn("same URL and year and a similar name, so the same venue; this name is kept as an alias", text)
         self.assertNotIn("conflict", text)
 
 

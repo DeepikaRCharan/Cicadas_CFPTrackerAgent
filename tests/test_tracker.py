@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.tracker import (
     decide_call_status,
+    names_similar,
     deadline_passed,
     DecisionsError,
     TrackerError,
@@ -484,6 +485,56 @@ class TestIdentityAliases(TrackerTestCase):
         self.assertEqual(results[0].status, "created")
         self.assertEqual(sorted(c.id for c in tracker.conferences), ["eci-2027", "eci-2029"])
         self.assertEqual(tracker.conferences[0].aliases, [])
+
+
+SPRINGER_LISTING = "https://link.springer.com/journal/10980/collections"
+LATIN_AMERICA = ("Landscape Ecology - Landscape Ecology in Latin America: Knowledge, Challenges, and Future Directions "
+                 "from the Global South")
+
+
+class TestIdentityGuard(TrackerTestCase):
+    """Same normalized URL + year merges only when the names are clearly similar."""
+
+    def venue(self, name, url, year, **ext):
+        return dict(name=name, year=year, url=url, extraction=make_extraction(**ext), profile_id="immune",
+                    fit_by_tier=make_fit())
+
+    def test_ser2027_name_variant_merges(self):
+        url = "https://ser2027.org/call-for-proposals/"
+        self.run_once(RUN_1, [self.venue("SER2027: 12th World Conference on Ecological Restoration", url, 2027)])
+        tracker, results, _ = self.run_once(RUN_2, [self.venue("SER2027 World Conference on Ecological Restoration", url, 2027)])
+        self.assertEqual(results[0].status, "updated")
+        self.assertEqual(tracker.identity_conflicts, [])
+        self.assertEqual(tracker.conferences[0].aliases, ["SER2027 World Conference on Ecological Restoration"])
+
+    def test_two_collections_on_the_springer_listing_are_a_conflict(self):
+        self.run_once(RUN_1, [self.venue(LATIN_AMERICA, SPRINGER_LISTING, 2026)])
+        before = load_tracker(self.tracker_path).conferences[0].model_dump()
+        for other in ("Landscape Ecology - Seascape ecology as a solution-focused science",
+                      "Landscape Ecology - Challenging landscapes and hunter-gatherers’ subsistence and mobility"):
+            with contextlib.redirect_stderr(io.StringIO()):
+                tracker, results, _ = self.run_once(RUN_2, [self.venue(other, SPRINGER_LISTING, 2026)])
+            self.assertEqual(results[0].status, "flagged", other)
+        self.assertEqual(len(tracker.conferences), 1)
+        self.assertEqual(tracker.conferences[0].model_dump(), before)  # never merged into the Latin America entry
+        self.assertEqual([c.reason.value for c in tracker.identity_conflicts], ["same_url_same_year_different_name"] * 2)
+        self.assertEqual(tracker.conferences[0].aliases, [])
+
+    def test_names_similar(self):
+        similar = [("SER2027: 12th World Conference on Ecological Restoration", "SER2027 World Conference on Ecological Restoration"),
+                   ("ECI 2027", "European Congress of Immunology 2027"),
+                   ("ECI 2027", "ECI Congress 2027"),
+                   (LATIN_AMERICA, "Landscape Ecology in Latin America: Knowledge, Challenges, and Future Directions from the Global South")]
+        dissimilar = [(LATIN_AMERICA, "Landscape Ecology - Seascape ecology as a solution-focused science"),
+                      (LATIN_AMERICA, "Landscape Ecology - Landscape Ecology and Landscape Approaches in the Iberian context: "
+                                      "challenges, opportunities and future prospects"),
+                      ("ECI 2027", "Nature Immunology Special Issue 2027"),
+                      ("IMMUNOLOGY2027", "Keystone Symposia: T Cells 2027")]
+        for a, b in similar:
+            self.assertTrue(names_similar(a, b), (a, b))
+            self.assertTrue(names_similar(b, a), (b, a))
+        for a, b in dissimilar:
+            self.assertFalse(names_similar(a, b), (a, b))
 
 
 if __name__ == "__main__":

@@ -68,40 +68,38 @@
     {
       "id": "landscape-ecology-landscape-ecology-in-latin-america-knowledge-challenges-and-future-directions-from-the-global-south-2026",
       "name": "Landscape Ecology - Landscape Ecology in Latin America: Knowledge, Challenges, and Future Directions from the Global South",
-      "url": "https://link.springer.com/journal/10980/collections",
+      "url": "https://link.springer.com/collections/gbhefgicae",
       "dates_url": null,
       "aliases": [],
       "first_seen": "2026-10-07T05:41:10Z",
-      "last_checked": "2026-10-07T05:41:10Z",
+      "last_checked": "2026-10-07T06:36:50Z",
       "extraction": {
-        "has_deadline": false,
-        "deadline": null,
-        "deadline_precision": null,
-        "deadline_as_stated": null,
+        "has_deadline": true,
+        "deadline": "2026-12-31",
+        "deadline_precision": "exact",
+        "deadline_as_stated": "31 December 2026",
         "submission_opens": null,
-        "call_status": "unknown",
+        "call_status": "open",
         "submission_type": null,
         "format_requirements": null,
         "fees": null,
         "mode": null,
-        "theme": null,
+        "theme": "Landscape Ecology in Latin America: Knowledge, Challenges, and Future Directions from the Global South",
         "location": null,
-        "access": null,
+        "access": "open",
         "complete": false,
         "missing_fields": [
           "submission_type",
-          "theme",
-          "submission_opens",
           "location",
-          "access",
           "format_requirements",
           "fees",
-          "mode"
+          "mode",
+          "submission_opens"
         ],
         "venue_tier": [
           "academic_practitioner"
         ],
-        "venue_tier_reasoning": "The URL indicates this is a Springer journal page (journal/10980, i.e. Landscape Ecology), which is a peer-reviewed academic journal. Although the page content failed to load (JavaScript disabled message), the identifiable structure—a Springer journal's 'collections' page—places it squarely in the academic_practitioner bucket as a scholarly, peer-reviewed publication venue for domain researchers."
+        "venue_tier_reasoning": "This is a Springer journal collection (special issue) soliciting research submissions on landscape ecology, describing the field in interdisciplinary academic terms and operating with an open submission status and deadline—hallmarks of a peer-reviewed academic publication process rather than trade media, corporate reporting, or institutional policy framing."
       },
       "matches": {
         "elephant-corridors": {

@@ -952,7 +952,7 @@ class _Handlers:
         found = lookup_venue(self.tracker, name, year, url)
         status, detail = self._tracker_status_of(found)
         if found.alias is not None:
-            detail += f" (tracked as {found.entry.name!r}: same URL and year, so the same venue; this name is kept as an alias)"
+            detail += f" (tracked as {found.entry.name!r}: same URL and year and a similar name, so the same venue; this name is kept as an alias)"
         return status, detail
 
     def _tracker_status_of(self, found) -> tuple[str, str]:

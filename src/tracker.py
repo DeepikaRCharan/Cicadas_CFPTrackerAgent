@@ -7,12 +7,13 @@ out of tracker.json, so every rule below is plain code:
 
 - **Identity** (brief, Rules > Identity). `id` = normalized name + year,
   and the domain alone is never used. The same normalized URL and the same
-  year is the same venue, whatever it's called: a different name is merged
-  and kept in `aliases`. A conflict is flagged only when the URL or the year
-  differs -- same id but a different URL is recorded in `identity_conflicts`
-  and logged as a WARNING, never merged, never created as a second entry.
-  Same URL but a different year is a new venue (sites reuse one CFP page
-  every year).
+  year is the same venue when the names are clearly similar (`names_similar`):
+  the other name is merged and kept in `aliases`. Dissimilar names on the same
+  URL and year -- two collections on one listing page -- are a conflict, as is
+  the same id with a different URL: recorded in `identity_conflicts` and
+  logged as a WARNING, never merged, never created as a second entry. Same
+  URL but a different year is a new venue (sites reuse one CFP page every
+  year).
 - **decisions.json** is read, never written. A bad value or a duplicate key
   stops the run with an error naming the line. An id that isn't tracked is a
   WARNING in the run log and the run continues. Decisions are copied into
@@ -374,14 +375,40 @@ class VenueLookup:
     conference_id: str
     entry: ConferenceEntry | None
     conflict: IdentityConflictReason | None = None
-    alias: str | None = None  # the candidate's name, when it matched by URL + year under a different name
+    alias: str | None = None  # the candidate's name, when it matched by URL + year under a similar name
+
+
+_NAME_FILLER = frozenset({"a", "an", "the", "and", "of", "for", "on", "in", "to", "from", "at", "by", "with"})
+
+
+def _name_words(name: str) -> list[str]:
+    """Content words of a normalized name: year tokens and filler dropped,
+    plurals folded ("challenges" -> "challenge")."""
+    words = [w for w in normalize_name(name).split("-") if w and w not in _NAME_FILLER]
+    return [w[:-1] if len(w) > 3 and w.endswith("s") else w for w in words]
+
+
+def names_similar(a: str, b: str) -> bool:
+    """Whether two names clearly name the same venue: their content words
+    overlap by at least half (Jaccard >= 0.5), or one is the other's acronym
+    ("ECI" for "European Congress of Immunology"). Sharing a couple of words
+    ("Landscape Ecology - ...") is not enough."""
+    wa, wb = _name_words(a), _name_words(b)
+    sa, sb = set(wa), set(wb)
+    if not sa or not sb:
+        return False
+    if len(sa & sb) / len(sa | sb) >= 0.5:
+        return True
+    acronym_a, acronym_b = "".join(w[0] for w in wa), "".join(w[0] for w in wb)
+    return (len(acronym_b) >= 2 and acronym_b in sa) or (len(acronym_a) >= 2 and acronym_a in sb)
 
 
 def lookup_venue(tracker: TrackerFile, name: str, year: int | None, url: str) -> VenueLookup:
     """The identity rules (brief, Rules > Identity), read-only: the same
-    normalized URL and year is the same venue whatever its name (a different
-    name comes back as `alias`); same id but a different URL is a conflict;
-    same URL with a different year is a new venue."""
+    normalized URL and year under a clearly similar name is the same venue
+    (the other name comes back as `alias`); under a dissimilar name, or the
+    same id with a different URL, it is a conflict; same URL with a
+    different year is a new venue."""
     candidate_id = make_id(name, year)
     candidate_url = normalize_url(url)
     same = next(
@@ -389,7 +416,11 @@ def lookup_venue(tracker: TrackerFile, name: str, year: int | None, url: str) ->
         None,
     )
     if same is not None:
-        return VenueLookup(same.id, same, alias=None if same.id == candidate_id else name)
+        if same.id == candidate_id:
+            return VenueLookup(same.id, same)
+        if any(names_similar(name, known) for known in (same.name, *same.aliases)):
+            return VenueLookup(same.id, same, alias=name)
+        return VenueLookup(candidate_id, same, IdentityConflictReason.SAME_URL_SAME_YEAR_DIFFERENT_NAME)
     entry = next((c for c in tracker.conferences if c.id == candidate_id), None)
     if entry is not None:  # same id, so same year -- and the URL differs, or `same` would have matched
         return VenueLookup(candidate_id, entry, IdentityConflictReason.SAME_ID_DIFFERENT_URL)
