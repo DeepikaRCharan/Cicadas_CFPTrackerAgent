@@ -35,11 +35,18 @@ Exit codes (the monthly workflow branches on them):
 Every failure is a WARNING on stderr, an ::error:: annotation on GitHub
 Actions, and a line in the trace. --problems-out writes them as JSON for
 `python -m src.notify --run-problems` to render.
+
+Each paper's trace (src/discover.py's Trace, plus the hand-off and re-check
+here) is saved to traces/, printed to the terminal (one-line summaries only,
+no <details> lists), and appended to $GITHUB_STEP_SUMMARY when running on
+GitHub Actions, so it shows on the run page. It ends with one line: counts,
+this paper's cost, and the tool-call total.
 """
 
 from __future__ import annotations
 
 import argparse
+import copy
 import datetime
 import json
 import os
@@ -50,7 +57,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from src.config import DECISIONS_PATH, MODEL_DISCOVERY, TRACES_DIR, TRACKER_PATH, WEB_TOOL_TYPES
-from src.discover import Candidate, Limits, Trace, discover, page_key
+from src.discover import BUCKET_LABELS, Candidate, Limits, Trace, discover, page_key
 from src.profile_schema import Profile, load_live_profiles
 from src.tracker import (
     DecisionsError,
@@ -66,7 +73,7 @@ from src.tracker import (
     upsert_venue,
     warn,
 )
-from src.tracker_schema import Extraction, TrackerFile
+from src.tracker_schema import Extraction, ExtractionFacts, OtherAvenuesFit, StandardFit, TrackerFile
 
 
 EXIT_OK = 0
@@ -84,6 +91,48 @@ def write_problems(path: str | Path, crashed: bool, problems: list[str]) -> None
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"crashed": crashed, "problems": problems}, indent=2) + "\n", encoding="utf-8")
+
+
+def _stated(value) -> str:
+    if value is None:
+        return "not stated"
+    return getattr(value, "value", str(value))
+
+
+def venue_detail_lines(facts: ExtractionFacts, tier, tier_reasoning: str, fit, profile_id: str) -> list[str]:
+    """An accepted venue in the trace: the extraction, the venue bucket(s)
+    with classify's reasoning, and every fit dimension with its rationale --
+    all stored fields, printed as they are."""
+    if not facts.has_deadline:
+        deadline = "rolling"
+    elif facts.deadline is None:
+        deadline = "not stated"
+    else:
+        deadline = f"{facts.deadline_as_stated} ({facts.deadline_precision.value})"
+    call = facts.call_status.value + (f", opens {facts.submission_opens}" if facts.submission_opens else "")
+    lines = [
+        "- extraction:",
+        f"  - submission type: {_stated(facts.submission_type)}; theme: {_stated(facts.theme)}",
+        f"  - deadline: {deadline}; call: {call}",
+        f"  - location: {_stated(facts.location)}; access: {_stated(facts.access)}; mode: {_stated(facts.mode)}; "
+        f"fees: {_stated(facts.fees)}",
+        f"  - format: {_stated(facts.format_requirements)}",
+        "  - " + ("complete" if facts.complete else "INCOMPLETE")
+        + (f"; not stated on the page: {', '.join(facts.missing_fields)}" if facts.missing_fields else ""),
+        f"- venue bucket(s): {', '.join(BUCKET_LABELS[t] for t in tier)} -- {tier_reasoning}",
+    ]
+    if not fit:
+        why = "extraction incomplete" if not facts.complete else "skipped by code: call closed, deadline passed or invite-only"
+        lines.append(f"- fit for {profile_id}: not scored ({why})")
+    for t, f in (fit or {}).items():
+        lines += [f"- fit for {profile_id}, {BUCKET_LABELS[t]}: overall {f.overall}/100",
+                  f"  - theme_fit {f.theme_fit.score}: {f.theme_fit.reasoning}"]
+        if isinstance(f, StandardFit):
+            lines += [f"  - genre_fit {f.genre_fit.score}: {f.genre_fit.reasoning}",
+                      f"  - format_fit {f.format_fit.score}: {f.format_fit.reasoning}"]
+        elif isinstance(f, OtherAvenuesFit):
+            lines.append(f"  - why no other venue type fit: {f.no_other_fit_reasoning} (low confidence: theme only)")
+    return lines
 
 
 def _fit_summary(fit_by_tier) -> str:
@@ -167,7 +216,8 @@ class Run:
             return "\n\n".join(f"=== Page: {u} ===\n{t}" for u, t in kept)
 
     def hand_off(self, profile: Profile, candidate: Candidate, trace: Trace,
-                 loop_text: dict[str, str] | None = None) -> None:
+                 loop_text: dict[str, str] | None = None) -> str:
+        """Returns the outcome: created, updated, flagged, skipped, not_tracked or failed."""
         label = f"{candidate.name} ({candidate.year if candidate.year is not None else 'rolling'})"
         trace.add(f"### {label}", f"- {candidate.call_page_url}"
                   + (f" + dates page {candidate.dates_page_url}" if candidate.dates_page_url else ""),
@@ -181,10 +231,10 @@ class Run:
                 self.save()
                 trace.add(f"- outcome: **flagged** ({found.conflict.value} with `{found.entry.id}`), "
                           "no model calls spent", "")
-                return
+                return "flagged"
             if found.entry is not None and profile.id in found.entry.matches:
                 trace.add("- outcome: skipped, already tracked for this paper (covered by re-check)", "")
-                return
+                return "skipped"
 
             urls = [candidate.call_page_url] + ([candidate.dates_page_url] if candidate.dates_page_url else [])
             page_text = self.page_text(urls, loop_text or {}, trace)
@@ -197,7 +247,7 @@ class Run:
                            f"not tracked; check {candidate.call_page_url} by hand")
                 self.problem(message)
                 trace.add(f"- outcome: **not tracked, needs a look**: {message}", "")
-                return
+                return "not_tracked"
             if found.entry is not None:
                 tier = found.entry.extraction.venue_tier
                 tier_reasoning = found.entry.extraction.venue_tier_reasoning
@@ -217,24 +267,30 @@ class Run:
             trace.add(f"- outcome: **{result.status}** `{result.conference_id}`; buckets "
                       f"{', '.join(t.value for t in tier)}; {completeness}; deadline "
                       f"{facts.deadline_as_stated or ('rolling' if not facts.has_deadline else 'not stated')}; "
-                      f"call {facts.call_status.value}; fit {_fit_summary(fit)}{logged}", "")
+                      f"call {facts.call_status.value}; fit {_fit_summary(fit)}{logged}")
+            trace.add(*venue_detail_lines(facts, tier, tier_reasoning, fit, profile.id), "")
+            return result.status
         except Exception as exc:  # one bad candidate never stops the run, but is never silent
             self.fail(trace, f"hand-off of {label}", exc)
             trace.add("")
+            return "failed"
 
     # --- step 4: re-check ----------------------------------------------------------
 
-    def recheck(self, profile: Profile, trace: Trace, skip_ids: set[str]) -> None:
+    def recheck(self, profile: Profile, trace: Trace, skip_ids: set[str]) -> int:
+        """Returns how many venues were re-checked."""
         trace.heading("Re-check of tracked venues")
         due = [c for c in self.tracker.conferences
                if profile.id in c.matches and is_open(c.matches[profile.id]) and c.id not in skip_ids]
         if not due:
             trace.add("Nothing open to re-check for this paper.")
+        checked = 0
         for conference in due:
             if conference.id in self.rechecked:
                 trace.add(f"- `{conference.id}`: already re-checked this run")
                 continue
             self.rechecked.add(conference.id)
+            checked += 1
             try:
                 urls = [conference.url] + ([conference.dates_url] if conference.dates_url else [])
                 page_text = self.extract.fetch_text(urls)
@@ -266,6 +322,7 @@ class Run:
                           + (f"; logged {', '.join(r.value for r in logged)}" if logged else ""))
             except Exception as exc:
                 self.fail(trace, f"re-check of {conference.id}", exc)
+        return checked
 
 
 def _year_of(conference_id: str) -> int | None:
@@ -274,19 +331,61 @@ def _year_of(conference_id: str) -> int | None:
     return id_year(conference_id)
 
 
-def _usage_lines() -> list[str]:
+def _usage_snapshot() -> dict[str, dict[str, int]]:
+    from src.llm import USAGE
+
+    return copy.deepcopy(USAGE)
+
+
+def _usage_lines(since: dict[str, dict[str, int]] | None = None, label: str = "this run") -> tuple[list[str], float]:
+    """Per-model usage and estimated cost since `since` (a _usage_snapshot),
+    or for the whole process. Returns (lines, total USD)."""
     from src.llm import USAGE, usage_cost
 
+    since = since or {}
     lines, total = [], 0.0
-    for model, t in USAGE.items():
+    for model, now in USAGE.items():
+        before = since.get(model, {})
+        t = {k: v - before.get(k, 0) for k, v in now.items()}
+        if not t.get("calls"):
+            continue
         cost = usage_cost(model, t["input_tokens"], t["output_tokens"], t["cache_write_tokens"],
                           t["cache_read_tokens"], t["searches"])
         total += cost
         lines.append(f"- {model}: {t['calls']} calls, {t['input_tokens']:,} in (+{t['cache_write_tokens']:,} cache write, "
                      f"{t['cache_read_tokens']:,} cache read) / {t['output_tokens']:,} out tokens, "
                      f"{t['searches']} searches, {t['fetches']} fetches -- about ${cost:.3f}")
-    lines.append(f"- **estimated total so far this run: about ${total:.3f}** (list prices; the Console bill is authoritative)")
-    return lines
+    lines.append(f"- **estimated total, {label}: about ${total:.3f}** (list prices; the Console bill is authoritative)")
+    return lines, total
+
+
+def summary_line(profile_id: str, judged, outcomes: dict[str, int], rechecked: int, tool_calls, cost: float,
+                 failures: int) -> str:
+    """The trace's final line: counts, this paper's cost, tool-call total."""
+    accepted = sum(1 for j in judged if j.tool == "accept_candidate" and j.outcome == "accepted")
+    refused = sum(1 for j in judged if j.outcome == "refused")
+    rejected = sum(1 for j in judged if j.tool == "record_result" and j.outcome not in ("refused", "live_cfp"))
+    live = sum(1 for j in judged if j.tool == "record_result" and j.outcome == "live_cfp")
+    handed = ", ".join(f"{n} {k.replace('_', ' ')}" for k, n in outcomes.items() if n) or "none"
+    calls = ", ".join(f"{n} {name}" for name, n in sorted(tool_calls.items(), key=lambda kv: (-kv[1], kv[0]))) or "none"
+    return (f"**Summary for {profile_id}:** {len(judged)} decision(s) on results -- {live} judged live, "
+            f"{accepted} accepted, {rejected} rejected, {refused} refused by code; hand-off: {handed}; "
+            f"{rechecked} re-checked; {failures} failure(s); {sum(tool_calls.values())} tool calls ({calls}); "
+            f"cost about ${cost:.3f}")
+
+
+def publish_trace(trace: Trace, path: Path) -> None:
+    """Save the trace, print it (terminal form: no <details> lists), and on
+    GitHub Actions append it to the run page's step summary."""
+    trace.save(path)
+    text = trace.terminal()
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    print(text.encode(encoding, "replace").decode(encoding, "replace"))
+    print(f"[run] trace written to {path}")
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        with open(summary, "a", encoding="utf-8") as f:
+            f.write(trace.markdown() + "\n\n")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -338,32 +437,40 @@ def main(argv: list[str] | None = None) -> int:
         trace = Trace(f"Discovery trace: {profile_id}, {now:%Y-%m-%d %H:%M} UTC")
         trace_path = Path(args.traces_dir) / f"{stamp}_{profile_id}.md"
         first_failure = len(run.failures)
+        usage_before = _usage_snapshot()
+        judged, rechecked = [], 0
+        outcomes = {k: 0 for k in ("created", "updated", "flagged", "skipped", "not_tracked", "failed")}
         try:
             run.ensure_classified(profile)
             result = discover(profile, tracker.profiles[profile_id], tracker, trace=trace, today=run.today,
                               limits=limits, model=args.discovery_model)
+            judged = result.judged
             trace.heading("Hand-off: extract, classify, judge fit, merge")
             if not result.candidates:
                 trace.add("No candidates accepted.")
             handed: set[str] = set()
             for candidate in result.candidates:
-                run.hand_off(profile, candidate, trace, result.fetched_text)
+                outcome = run.hand_off(profile, candidate, trace, result.fetched_text)
+                outcomes[outcome] = outcomes.get(outcome, 0) + 1
                 handed.add(lookup_venue(tracker, candidate.name, candidate.year, candidate.call_page_url).conference_id)
-            run.recheck(profile, trace, skip_ids=handed)
+            rechecked = run.recheck(profile, trace, skip_ids=handed)
         except Exception as exc:
             run.fail_paper(trace, profile_id, exc)
             traceback.print_exc()
         finally:
             trace.heading("Usage and cost")
-            trace.add(*_usage_lines())
-            if run.failures[first_failure:]:
+            usage, cost = _usage_lines(usage_before, f"this paper ({profile_id})")
+            trace.add(*usage)
+            failures = run.failures[first_failure:]
+            if failures:
                 trace.heading("Failures")
-                trace.add(*(f"- {f}" for f in run.failures[first_failure:]))
-            print(f"[run] trace written to {trace.save(trace_path)}")
+                trace.add(*(f"- {f}" for f in failures))
+            trace.add("", summary_line(profile_id, judged, outcomes, rechecked, trace.tool_calls, cost, len(failures)))
+            publish_trace(trace, trace_path)
 
     run.save()
     print(f"[run] done: {len(tracker.conferences)} tracked venue(s), {len(run.failures)} failure(s) -> {tracker_path}")
-    for line in _usage_lines():
+    for line in _usage_lines()[0]:
         print(f"[run] {line[2:]}")
     if args.problems_out:
         write_problems(args.problems_out, False, run.problems())

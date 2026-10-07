@@ -1,0 +1,118 @@
+# Cicadas monthly run: decisions sync, discovery, re-check of tracked venues,
+# then the digest. Brief: Architecture decisions > Scheduling.
+#
+# Pause: Actions tab > "Monthly run" > ... > Disable workflow. Nothing else
+# needs to change; re-enabling resumes at the next 7th (missed runs are not
+# replayed).
+#
+# Exit codes from src.run: 0 clean; 3 partial (a candidate, re-check or
+# whole paper's search failed: digest still sent, with a Run problems
+# section, then the job fails); anything else means the run couldn't start
+# (no digest, job fails). Either way the tracker and traces are committed,
+# so partial progress is never lost.
+#
+# Each paper's trace is also written to the run page (job summary) by
+# src.run, via $GITHUB_STEP_SUMMARY -- no extra step needed.
+
+name: Monthly run
+
+on:
+  schedule:
+    # 7th of every month, 14:17 UTC = 9:17 a.m. CDT / 8:17 a.m. CST.
+    # (:17, not :00 -- GitHub delays top-of-the-hour schedules the most.)
+    - cron: "17 14 7 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write # push tracker.json and traces/ back with the built-in GITHUB_TOKEN
+
+concurrency:
+  group: cicadas-tracker # shared with the daily watcher: never two tracker writers at once
+  cancel-in-progress: false
+
+jobs:
+  monthly:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Unit tests (no API calls)
+        run: python -m unittest discover -s tests
+
+      - name: Check secrets
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          NOTIFY_TO: ${{ secrets.NOTIFY_TO }}
+        run: |
+          missing=""
+          for name in ANTHROPIC_API_KEY RESEND_API_KEY NOTIFY_TO; do
+            [ -n "${!name}" ] || missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error title=Cicadas secrets::Missing repository secret(s):$missing -- add under Settings > Secrets and variables > Actions"
+            exit 1
+          fi
+
+      - name: Discover and re-check
+        id: run
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          set +e
+          python -m src.run --problems-out logs/run_problems.json
+          code=$?
+          set -e
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          case "$code" in
+            0) ;;
+            3) echo "::warning title=Cicadas run::Partial run -- the digest goes out with a Run problems section, and the job fails at the end" ;;
+            *) echo "::error title=Cicadas run::Run could not start (exit $code) -- no digest this run"; exit "$code" ;;
+          esac
+
+      - name: Send digest
+        if: steps.run.outputs.exit_code == '0' || steps.run.outputs.exit_code == '3'
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          NOTIFY_TO: ${{ secrets.NOTIFY_TO }}
+        run: python -m src.notify digest --run-problems logs/run_problems.json
+
+      - name: Commit tracker and traces
+        if: ${{ !cancelled() && steps.run.outcome != 'skipped' }}
+        run: |
+          git add tracker.json traces/
+          if git diff --cached --quiet; then
+            echo "No changes -- nothing to commit"
+            exit 0
+          fi
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -m "Monthly run $(date -u +%Y-%m-%d)"
+          git pull --rebase origin "$GITHUB_REF_NAME"
+          git push origin "HEAD:$GITHUB_REF_NAME"
+
+      - name: Fail on partial run
+        if: ${{ !cancelled() && steps.run.outputs.exit_code == '3' }}
+        run: |
+          echo "::error title=Cicadas run::Part of the run failed -- see the Run problems section of the digest and the annotations above"
+          exit 1
+
+      - name: Upload logs and traces
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: monthly-logs-${{ github.run_id }}
+          path: |
+            logs/
+            traces/
+          retention-days: 30
+          if-no-files-found: ignore

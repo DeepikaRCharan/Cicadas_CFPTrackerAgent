@@ -29,13 +29,20 @@ Two phases, each its own conversation, sequenced by code:
 
 The loop only *finds* candidates. Extraction, classify, judge-fit and the
 tracker merge happen afterwards, in code (src/run.py), for every accepted
-candidate. Every turn is written to a readable Markdown trace (traces/).
+candidate. Every turn is written to a readable Markdown trace (traces/): each
+tool call in order, numbered, with the one-line reason the model wrote before
+it (verbatim from its own text, or "(no reason stated before this call)" --
+never written by the code), a one-line result summary logged by the code from
+what actually came back, and the full result list collapsed in <details>
+(left out of the terminal rendering).
 """
 
 from __future__ import annotations
 
 import datetime
+import html
 import json
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -98,6 +105,7 @@ class Candidate:
     reason: str
     conflict: bool = False  # identity conflict: flagged by run.py, no model calls spent
     deadline_quote: str = ""
+    quote_page: str = ""  # the fetched page the code found deadline_quote on
 
 
 @dataclass
@@ -112,6 +120,19 @@ class DiscoveryResult:
     # page_key(url) -> readable text the loop fetched; the hand-off's
     # fallback when its own fetch is blocked
     fetched_text: dict[str, str] = field(default_factory=dict)
+    judged: list["Judgement"] = field(default_factory=list)
+
+
+@dataclass
+class Judgement:
+    """One record_result or accept_candidate call, as the code handled it --
+    the trace's Candidates section and the run's counts come from these."""
+
+    tool: str
+    label: str  # the URL, or "name (year) -- URL" for accept_candidate
+    outcome: str  # "accepted", "refused", or record_result's verdict
+    reason: str  # the model's reason, given in the call
+    reply: str  # the code's reply, first line
 
 
 # --- Queries -------------------------------------------------------------------
@@ -200,8 +221,10 @@ that happens later, from the venue's own page. Your job is to find venues' \
 own, currently live call pages and hand them over.
 
 How to work:
-- Before each web search, write one short sentence: what you are searching \
-for and why.
+- Before each tool call -- every search, fetch, record_result, \
+check_tracker, accept_candidate and finish -- write one short line of text: \
+what you are about to do and why. One line per call, even when you make \
+several calls in a row.
 - Judge results from their search snippets and titles where you can: \
 reject what is plainly stale, off-topic or not a call without fetching it. \
 But live_cfp is only for a page you have fetched in this run, that came \
@@ -350,12 +373,67 @@ def _main_opening(profile, classification, main, state, today) -> str:
 # --- Trace -----------------------------------------------------------------------
 
 
+NO_REASON = "(no reason stated before this call)"
+REASON_MAX_CHARS = 240
+
+
+def stated_reason(text: str) -> str:
+    """The one-line reason the model wrote before a call: the last line of
+    its preceding text, verbatim (if that line is long, its last sentence,
+    cut at REASON_MAX_CHARS). Never composed by the code."""
+    lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
+    if not lines:
+        return NO_REASON
+    line = lines[-1].lstrip(">*#- ").strip() or lines[-1]
+    if len(line) > REASON_MAX_CHARS:
+        sentences = [x for x in line.replace("! ", ". ").replace("? ", ". ").split(". ") if x.strip()]
+        line = sentences[-1].strip() if sentences else line
+        if len(line) > REASON_MAX_CHARS:
+            line = line[:REASON_MAX_CHARS].rstrip() + "..."
+    return f'"{line}"'
+
+
+def _result_summary(name: str, result) -> tuple[str, list[str]]:
+    """(one-line summary, full list) for one server tool call's result, from
+    what the API actually returned."""
+    if result is None:
+        if name in ("web_search", "web_fetch"):
+            return "(no result in this response)", []
+        return "ran server-side (filtered results before the model saw them)", []
+    content = result.content
+    if name == "web_search":
+        if not isinstance(content, list):
+            return f"search error: {getattr(content, 'error_code', content)}", []
+        if not content:
+            return "no results", []
+        items = []
+        for item in content:
+            age = f" ({item.page_age})" if getattr(item, "page_age", None) else ""
+            items.append(f"- {item.title} — {item.url}{age}")
+        return f"{len(content)} result(s); top: {items[0][2:]}", items
+    if getattr(content, "type", "") == "web_fetch_result":
+        title = getattr(getattr(content, "content", None), "title", None)
+        readable, page_text, chars = fetched_page(content)
+        named = f" — {title}" if title else ""
+        if not readable:
+            return f"**UNREADABLE** ({chars} characters of text): not usable as evidence — {content.url}", []
+        kind = "readable PDF" if page_text is None else f"readable, {chars:,} characters"
+        return f"{kind}{named} — {content.url}", []
+    return f"fetch error: {getattr(content, 'error_code', content)}", []
+
+
 class Trace:
-    """A readable Markdown record of one profile's run: searches, results,
-    fetches, decisions and their reasons, limits, hand-off outcomes."""
+    """A readable Markdown record of one profile's run.
+
+    Every tool call is numbered, in order, with the reason the model wrote
+    before it and a one-line result summary; long lists go in collapsed
+    <details> blocks. `markdown()` is the file and the GitHub run page;
+    `terminal()` drops the <details> blocks for a local run's console."""
 
     def __init__(self, title: str):
         self.lines: list[str] = [f"# {title}", ""]
+        self.tool_calls: Counter[str] = Counter()
+        self._stated: dict[str, str] = {}  # decision-tool call id -> reason stated before it
 
     def add(self, *lines: str) -> None:
         self.lines.extend(lines)
@@ -363,55 +441,94 @@ class Trace:
     def heading(self, text: str) -> None:
         self.lines += ["", f"## {text}", ""]
 
+    def details(self, summary: str, items: list[str]) -> None:
+        """A collapsed list: shown in the .md file and on the run page, left
+        out of the terminal."""
+        if items:
+            self.lines += [f"<details><summary>{html.escape(summary)}</summary>", "",
+                           *(html.escape(item, quote=False) for item in items), "", "</details>", ""]
+
+    def markdown(self) -> str:
+        return "\n".join(self.lines) + "\n"
+
+    def terminal(self) -> str:
+        out, hidden = [], False
+        for line in self.lines:
+            if line.startswith("<details>"):
+                hidden = True
+            elif hidden:
+                hidden = line != "</details>"
+            else:
+                out.append(line)
+        return "\n".join(out) + "\n"
+
     def save(self, path: str | Path) -> Path:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("\n".join(self.lines) + "\n", encoding="utf-8")
+        path.write_text(self.markdown(), encoding="utf-8")
         return path
+
+    def _number(self, name: str) -> int:
+        self.tool_calls[name] += 1
+        return sum(self.tool_calls.values())
 
     def response_blocks(self, response) -> None:
         """Everything the model and the server did in one response, in
-        order. Decision-tool calls are logged by their handlers instead,
-        together with the code's reply."""
+        order. Each call gets the text block written just before it (and only
+        that one) as its stated reason. Server tool calls are logged here with
+        their results, matched by tool_use_id; decision-tool calls are logged
+        by their handlers, with the code's reply."""
+        results = {getattr(b, "tool_use_id", None): b for b in response.content
+                   if getattr(b, "type", "") in ("web_search_tool_result", "web_fetch_tool_result")}
+        texts = [b.text.strip() for b in response.content if getattr(b, "type", "") == "text" and b.text.strip()]
+        if texts:
+            self.details("Model's full text this turn",
+                         [f"> {line}" if line.strip() else ">" for t in texts for line in t.splitlines()])
+        pending = ""
         for block in response.content:
             kind = getattr(block, "type", "")
             if kind == "text" and block.text.strip():
-                self.add(*(f"> {line}" if line else ">" for line in block.text.strip().splitlines()), "")
+                pending = block.text
+            elif kind == "tool_use":
+                self._stated[block.id] = stated_reason(pending)
+                pending = ""
             elif kind == "server_tool_use":
+                reason, pending = stated_reason(pending), ""
                 inp = block.input if isinstance(block.input, dict) else {}
-                if block.name == "web_search":
-                    self.add(f"**Search** `{inp.get('query', '?')}`")
-                elif block.name == "web_fetch":
-                    self.add(f"**Fetch** {inp.get('url', '?')}")
-                else:
-                    self.add(f"_(server ran {block.name} to filter results)_")
-            elif kind == "web_search_tool_result":
-                content = block.content
-                if isinstance(content, list):
-                    if not content:
-                        self.add("- (no results)")
-                    for item in content[:10]:
-                        age = f" ({item.page_age})" if getattr(item, "page_age", None) else ""
-                        self.add(f"- {item.title} — {item.url}{age}")
-                    self.add("")
-                else:
-                    self.add(f"- search error: {getattr(content, 'error_code', content)}", "")
-            elif kind == "web_fetch_tool_result":
-                content = block.content
-                if getattr(content, "type", "") == "web_fetch_result":
-                    title = getattr(getattr(content, "content", None), "title", None)
-                    readable, _, chars = fetched_page(content)
-                    note = "" if readable else f" -- **UNREADABLE** ({chars} characters of text): not usable as evidence"
-                    self.add(f"- fetched {content.url}" + (f" — {title}" if title else "") + note, "")
-                else:
-                    self.add(f"- fetch error: {getattr(content, 'error_code', content)}", "")
+                n = self._number(block.name)
+                target = (f"`{inp.get('query', '?')}`" if block.name == "web_search"
+                          else inp.get("url", "?") if block.name == "web_fetch" else "")
+                summary, items = _result_summary(block.name, results.get(block.id))
+                self.add(f"**#{n} {block.name}** {target}".rstrip(), f"- reason (before the call): {reason}",
+                         f"- result: {summary}", "")
+                self.details(f"All {len(items)} results", items)
 
-    def decision(self, name: str, args: dict, reply: str, refused: bool) -> None:
+    def decision(self, block_id: str, name: str, args: dict, reply: str, refused: bool) -> None:
+        n = self._number(name)
         shown = {k: v for k, v in args.items() if k != "reason"}
-        self.add(f"**Decision: {name}** {json.dumps(shown, ensure_ascii=False)}")
+        self.add(f"**#{n} {name}** {json.dumps(shown, ensure_ascii=False)}",
+                 f"- reason (before the call): {self._stated.pop(block_id, NO_REASON)}")
         if args.get("reason"):
-            self.add(f"- reason: {args['reason']}")
-        self.add(f"- {'REFUSED by code' if refused else 'code'}: {reply.split(chr(10))[0]}", "")
+            self.add(f"- reason (in the call): {args['reason']}")
+        self.add(f"- {'REFUSED by code' if refused else 'code'}: {reply.splitlines()[0] if reply else ''}", "")
+
+    def candidates(self, judged: list["Judgement"]) -> None:
+        """The Candidates section: every record_result / accept_candidate
+        decision, as the code handled it."""
+        self.heading("Candidates")
+        if not judged:
+            self.add("No results were judged.")
+        for j in judged:
+            if j.tool == "accept_candidate":
+                status = "ACCEPTED" if j.outcome == "accepted" else "REFUSED BY CODE (accept_candidate)"
+            elif j.outcome == "refused":
+                status = "REFUSED BY CODE (record_result)"
+            elif j.outcome == "live_cfp":
+                status = "JUDGED LIVE"
+            else:
+                status = f"REJECTED ({j.outcome})"
+            self.add(f"- **{status}**: {j.label}", f"  - reason (in the call): {j.reason or '(none given)'}",
+                     f"  - code: {j.reply}")
 
 
 # --- The loop ----------------------------------------------------------------------
@@ -438,6 +555,7 @@ class _State:
     queries: list[str] = field(default_factory=list)  # searches that returned results
     recorded: list[tuple[str, str, str]] = field(default_factory=list)  # (url, verdict, reason)
     candidates: list[Candidate] = field(default_factory=list)
+    judged: list[Judgement] = field(default_factory=list)
     cost: float = 0.0
     max_turn_cost: float = 0.0
     # Tokens in the current conversation's prompt (everything written to it
@@ -610,7 +728,20 @@ class _Handlers:
                 reply, refused = handler(args)
             except (KeyError, TypeError, ValueError) as exc:
                 reply, refused = f"bad arguments: {exc}", True
-        self.trace.decision(block.name, args, reply, refused)
+        self.trace.decision(block.id, block.name, args, reply, refused)
+        first_line = reply.split("\n")[0]
+        if block.name == "record_result":
+            self.state.judged.append(Judgement(
+                block.name, str(args.get("url", "?")), "refused" if refused else str(args.get("verdict", "?")),
+                str(args.get("reason", "")), first_line))
+        elif block.name == "accept_candidate":
+            year = args.get("year")
+            label = f"{args.get('name', '?')} ({year if year is not None else 'rolling'}) — {args.get('call_page_url', '?')}"
+            if not refused:
+                c = self.state.candidates[-1]
+                first_line += f'; deadline quote verified on {c.quote_page}: "{c.deadline_quote}"'
+            self.state.judged.append(Judgement(block.name, label, "refused" if refused else "accepted",
+                                               str(args.get("reason", "")), first_line))
         return {
             "type": "tool_result",
             "tool_use_id": block.id,
@@ -692,7 +823,8 @@ class _Handlers:
         texts = [state.fetched_text.get(page_key(u)) for u in pages]
         if not quote:
             return "not accepted: deadline_quote is empty -- copy the deadline wording from the page you read", True
-        if not any(t and quote_found(quote, t) for t in texts):
+        quote_page = next((u for u, t in zip(pages, texts) if t and quote_found(quote, t)), None)
+        if quote_page is None:
             where = " or ".join(pages)
             if not any(texts):
                 return f"not accepted: no text was kept for {where} (e.g. a PDF), so the quote can't be checked", True
@@ -703,7 +835,7 @@ class _Handlers:
                for c in state.candidates):
             return f"{candidate_id!r} was already accepted this run", True
         state.candidates.append(Candidate(name, year, url, dates_url, evidence, args.get("reason", ""),
-                                          conflict=status == "conflict", deadline_quote=quote))
+                                          conflict=status == "conflict", deadline_quote=quote, quote_page=quote_page))
         tail = " -- candidate limit now reached, discovery will end" if len(state.candidates) >= state.limits.candidates else ""
         return f"accepted as {candidate_id!r} ({status}){tail}", False
 
@@ -795,6 +927,8 @@ def discover(
         f"Paper: {profile.title} (`{profile.id}`)",
         f"Loop model: {model}, web tools {' + '.join(WEB_TOOL_TYPES[model])}",
         f"Read as: {', '.join(BUCKET_LABELS[b] for b in classification.paper_bucket)}",
+        "Cues that drove that call:", *(f"- {cue}" for cue in classification.paper_bucket_cues),
+        f"Reasoning: {classification.paper_bucket_reasoning}", "",
         f"Limits: {limits.turns} turns, {limits.searches} searches ({probe_searches} for probes), "
         f"{limits.fetches} fetches, {limits.candidates} candidates, ${limits.cost_usd:.2f} loop spend",
         "", "Main seeds: " + "; ".join(f"`{q}`" for q in main),
@@ -826,5 +960,6 @@ def discover(
         message = f"probes not run: {', '.join(BUCKET_LABELS[b] for b in missing)}"
         print(f"[discover] {profile.id}: WARNING: {message}")
         trace.add(f"**WARNING: {message}**")
+    trace.candidates(state.judged)
     return DiscoveryResult(state.candidates, stop_reason, state.turns, state.searches, state.fetches, missing,
-                           state.cost, dict(state.fetched_text))
+                           state.cost, dict(state.fetched_text), list(state.judged))

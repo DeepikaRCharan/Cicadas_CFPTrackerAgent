@@ -134,6 +134,10 @@ class DiscoverTestCase(unittest.TestCase):
     def trace_text(self):
         return "\n".join(self.trace.lines)
 
+    def turns_text(self):
+        """The trace up to the Candidates section (which repeats code replies)."""
+        return self.trace_text().split("## Candidates")[0]
+
 
 class TestQueries(DiscoverTestCase):
     def test_seed_queries_from_profile(self):
@@ -178,9 +182,9 @@ class TestPhases(DiscoverTestCase):
         self.assertEqual((result.searches, result.probes_missing), (4, []))
         self.assertTrue(result.stop_reason.startswith("finish: main searches exhausted"))
         trace = self.trace_text()
-        for snippet in ("## Phase 1: probes", "## Phase 2: main searches", "**Search** `Foxp3 call for abstracts 2027`",
-                        "> Main: Foxp3 abstracts.", "code: new: not tracked", "**Decision: accept_candidate**",
-                        "- reason: live call for immunology abstracts", "probes phase finished: all probes judged"):
+        for snippet in ("## Phase 1: probes", "## Phase 2: main searches", "web_search** `Foxp3 call for abstracts 2027`",
+                        '- reason (before the call): "Main: Foxp3 abstracts."', "code: new: not tracked",
+                        "accept_candidate** {", "- reason (in the call): live call for immunology abstracts", "probes phase finished: all probes judged"):
             self.assertIn(snippet, trace)
 
     def test_finish_before_probes_is_pushed_back_once(self):
@@ -252,7 +256,7 @@ class TestDecisions(DiscoverTestCase):
         result = self.run_loop(api, Limits(searches=0))
         trace = self.trace_text()
         self.assertIn("**UNREADABLE**", trace)
-        self.assertEqual(trace.count("came back with no readable text"), 2)
+        self.assertEqual(self.turns_text().count("came back with no readable text"), 2)
         self.assertEqual(result.candidates, [])
 
     def test_dates_page_evidence_must_have_been_read(self):
@@ -327,7 +331,7 @@ class TestDecisions(DiscoverTestCase):
         )
         result = self.run_loop(api, Limits(searches=0))
         trace = self.trace_text()
-        self.assertEqual(trace.count("is on a blocked domain -- refused outright"), 2)
+        self.assertEqual(self.turns_text().count("is on a blocked domain -- refused outright"), 2)
         self.assertNotIn("follow through", trace)
         self.assertEqual(result.candidates, [])
 
@@ -491,6 +495,98 @@ class TestTraceFile(DiscoverTestCase):
         self.assertTrue(body.startswith("# test trace"))
         self.assertIn("## Turn 1", body)
         self.assertIn("## Stopped", body)
+
+
+class TestTraceLayout(DiscoverTestCase):
+    """Step 9 trace layout: numbered calls, the model's own stated reason per
+    call, one-line result summaries, <details> lists only outside the terminal."""
+
+    def run_eci(self):
+        api = FakeAPI(
+            response(text("Looking for immunology congress calls.\nSearching the ECI call first."),
+                     search("ECI 2027 call for abstracts", results=[("ECI 2027 call for abstracts", ECI["call_page_url"]),
+                                                                    ("Some <b>listing</b>", "https://example.org/x")]),
+                     search("immunology congress 2027", sid="s2"),
+                     text("Fetching the ECI call page to read the deadline."),
+                     fetch(ECI["call_page_url"]),
+                     tool("check_tracker", "c1", name="ECI 2027", year=2027, url=ECI["call_page_url"])),
+            response(text("The page shows an open call."),
+                     tool("record_result", "r1", url=ECI["call_page_url"], verdict="live_cfp", reason="open, deadline 31 March 2027"),
+                     tool("record_result", "r2", url="https://example.org/x", verdict="aggregator", reason="a listing"),
+                     text("Accepting ECI 2027."),
+                     tool("accept_candidate", "a1", **ECI)),
+            finish("done"))
+        self.run_loop(api, Limits(**SINGLE_PHASE))
+
+    def test_reason_is_the_text_just_before_each_call_never_invented(self):
+        self.run_eci()
+        lines = self.trace.lines
+        first = lines.index("**#1 web_search** `ECI 2027 call for abstracts`")
+        self.assertEqual(lines[first + 1], '- reason (before the call): "Searching the ECI call first."')
+        second = lines.index("**#2 web_search** `immunology congress 2027`")
+        self.assertEqual(lines[second + 1], "- reason (before the call): (no reason stated before this call)")
+        fetch_line = lines.index(f"**#3 web_fetch** {ECI['call_page_url']}")
+        self.assertEqual(lines[fetch_line + 1], '- reason (before the call): "Fetching the ECI call page to read the deadline."')
+
+    def test_decision_reasons_labelled_before_and_in_the_call(self):
+        self.run_eci()
+        text = self.turns_text()
+        self.assertIn('**#5 record_result** {"url": "https://eci2027.org/call-for-abstracts/", "verdict": "live_cfp"}\n'
+                      '- reason (before the call): "The page shows an open call."\n'
+                      "- reason (in the call): open, deadline 31 March 2027", text)
+        self.assertIn('- reason (before the call): (no reason stated before this call)\n'
+                      "- reason (in the call): a listing", text)
+        self.assertIn('- reason (before the call): "Accepting ECI 2027."\n'
+                      "- reason (in the call): live call for immunology abstracts", text)
+
+    def test_one_line_result_summaries_logged_from_results(self):
+        self.run_eci()
+        text = self.turns_text()
+        self.assertIn("- result: 2 result(s); top: ECI 2027 call for abstracts — https://eci2027.org/call-for-abstracts/", text)
+        self.assertIn("- result: readable, 559 characters — Call for abstracts — https://eci2027.org/call-for-abstracts/", text)
+
+    def test_details_in_markdown_only(self):
+        self.run_eci()
+        md, term = self.trace.markdown(), self.trace.terminal()
+        self.assertIn("<details><summary>All 2 results</summary>", md)
+        self.assertIn("- Some &lt;b&gt;listing&lt;/b&gt; — https://example.org/x", md)  # escaped inside <details>
+        self.assertIn("<details><summary>Model&#x27;s full text this turn</summary>", md)
+        for raw in ("<details>", "</details>", "<summary>", "Some <b>listing", "&lt;"):
+            self.assertNotIn(raw, term)
+        self.assertIn("- result: 2 result(s); top:", term)
+        self.assertEqual(md.count("<details>"), md.count("</details>"))
+
+    def test_candidates_section_with_verified_quote(self):
+        self.run_eci()
+        cands = self.trace_text().split("## Candidates")[1]
+        self.assertIn("- **JUDGED LIVE**: https://eci2027.org/call-for-abstracts/", cands)
+        self.assertIn("- **REJECTED (aggregator)**: https://example.org/x", cands)
+        self.assertIn("- **ACCEPTED**: ECI 2027 (2027) — https://eci2027.org/call-for-abstracts/", cands)
+        self.assertIn('deadline quote verified on https://eci2027.org/call-for-abstracts/: "Submission deadline: 31 March 2027"', cands)
+
+    def test_refused_accept_listed_as_refused(self):
+        bad = dict(ECI, deadline_quote="Deadline: 1 April 2027")
+        api = FakeAPI(response(search("q"), fetch(ECI["call_page_url"]), tool("accept_candidate", "a1", **bad)),
+                      finish("done"))
+        self.run_loop(api, Limits(**SINGLE_PHASE))
+        cands = self.trace_text().split("## Candidates")[1]
+        self.assertIn("- **REFUSED BY CODE (accept_candidate)**: ECI 2027 (2027)", cands)
+        self.assertIn("does not appear on", cands)
+
+    def test_tool_call_counts(self):
+        self.run_eci()
+        self.assertEqual(dict(self.trace.tool_calls), {"web_search": 2, "web_fetch": 1, "check_tracker": 1, "record_result": 2,
+                                                       "accept_candidate": 1, "finish": 1})
+
+    def test_header_has_paper_bucket_and_cues(self):
+        self.run_eci()
+        head = self.trace_text().split("## ")[0]
+        self.assertIn("Read as: Academic & Practitioner", head)
+        self.assertIn("Cues that drove that call:\n- a\n- b\n- c", head)
+
+    def test_prompt_asks_for_a_line_before_every_call(self):
+        from src.discover import SYSTEM_PROMPT
+        self.assertIn("Before each tool call", SYSTEM_PROMPT)
 
 
 if __name__ == "__main__":

@@ -17,7 +17,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.discover import Candidate, Trace
-from src.run import EXIT_CRASHED, EXIT_OK, EXIT_PARTIAL, Run, write_problems
+from src.run import EXIT_CRASHED, EXIT_OK, EXIT_PARTIAL, Run, publish_trace, summary_line, write_problems
 from src.run import main as run_main
 from src.tracker import load_tracker, record_paper_classification, save_tracker, upsert_venue
 from src.tracker_schema import ExtractionFacts, TrackerFile, VenueTier
@@ -267,7 +267,7 @@ class TestExitCodes(RunTestCase):
             searched.append(profile.id)
             if profile.id == fx.ELEPHANT:
                 raise RuntimeError("529 overloaded")
-            return NS(candidates=[], fetched_text={})
+            return NS(candidates=[], fetched_text={}, judged=[])
 
         out = io.StringIO()
         with mock.patch("src.run.discover", side_effect=fake_discover), contextlib.redirect_stdout(out),                 contextlib.redirect_stderr(out):
@@ -279,11 +279,83 @@ class TestExitCodes(RunTestCase):
         self.assertFalse(data["crashed"])
         self.assertEqual(len(data["problems"]), 1)
         self.assertTrue(data["problems"][0].startswith("The whole search for elephant-corridors failed"))
+        # every paper's trace still ends with its summary line
+        for trace_file in (Path(self._dir.name) / "traces").glob("*.md"):
+            last = trace_file.read_text(encoding="utf-8").rstrip().splitlines()[-1]
+            self.assertTrue(last.startswith("**Summary for "), last)
 
     def test_write_problems_round_trips(self):
         path = Path(self._dir.name) / "p.json"
         write_problems(path, False, ["a failed", "b failed"])
         self.assertEqual(json.loads(path.read_text(encoding="utf-8")), {"crashed": False, "problems": ["a failed", "b failed"]})
+
+
+class TestTraceOutput(RunTestCase):
+    def test_accepted_venue_shows_extraction_bucket_and_every_dimension(self):
+        run, _ = self.make_run({ECI_URL: facts()})
+        self.assertEqual(self.quiet(run.hand_off, self.profile, Candidate("ECI 2027", 2027, ECI_URL, None, "on_call_page", "r"),
+                                    self.trace), "created")
+        text = "\n".join(self.trace.lines)
+        for snippet in ("- extraction:", "  - submission type: abstract; theme: Immunology",
+                        "  - deadline: 31 March 2027 (exact); call: not_yet_open, opens November 2026",
+                        "  - location: Florence, Italy; access: open; mode: not stated; fees: not stated",
+                        "not stated on the page: format_requirements, fees, mode",
+                        "- venue bucket(s): Academic & Practitioner -- research congress",
+                        "- fit for immune-tolerance, Academic & Practitioner: overall 80/100",
+                        "  - theme_fit 90: on topic", "  - genre_fit 80: research", "  - format_fit 70: abstract"):
+            self.assertIn(snippet, text)
+
+    def test_incomplete_venue_says_not_scored_and_why(self):
+        run, _ = self.make_run({ECI_URL: facts(**INCOMPLETE)})
+        self.quiet(run.hand_off, self.profile, Candidate("ECI 2027", 2027, ECI_URL, None, "not_found", "r"), self.trace)
+        self.assertIn("- fit for immune-tolerance: not scored (extraction incomplete)", "\n".join(self.trace.lines))
+
+    def test_hand_off_outcomes(self):
+        run, _ = self.make_run({ECI_URL: facts()})
+        broken = Candidate("Broken 2027", 2027, "https://broken.example/cfp", None, "on_call_page", "r")
+        self.assertEqual(self.quiet(run.hand_off, self.profile, broken, self.trace), "failed")
+        eci = Candidate("ECI 2027", 2027, ECI_URL, None, "on_call_page", "r")
+        self.quiet(run.hand_off, self.profile, eci, self.trace)
+        self.assertEqual(self.quiet(run.hand_off, self.profile, eci, self.trace), "skipped")
+
+    def test_summary_line(self):
+        from collections import Counter
+        from src.discover import Judgement
+        judged = [Judgement("record_result", "u1", "stale", "old", "noted"),
+                  Judgement("record_result", "u2", "live_cfp", "open", "noted"),
+                  Judgement("accept_candidate", "ECI", "accepted", "r", "accepted"),
+                  Judgement("accept_candidate", "X", "refused", "r", "not accepted")]
+        line = summary_line("immune-tolerance", judged, {"created": 1, "updated": 0, "failed": 0}, 2,
+                            Counter({"web_search": 6, "web_fetch": 4, "record_result": 2}), 0.2149, 0)
+        self.assertEqual(line, "**Summary for immune-tolerance:** 4 decision(s) on results -- 1 judged live, 1 accepted, "
+                               "1 rejected, 1 refused by code; hand-off: 1 created; 2 re-checked; 0 failure(s); "
+                               "12 tool calls (6 web_search, 4 web_fetch, 2 record_result); cost about $0.215")
+
+    def test_publish_trace_prints_terminal_form_and_appends_step_summary(self):
+        trace = Trace("t")
+        trace.add("**#1 web_search** `q`", "- result: 2 result(s); top: A — https://a")
+        trace.details("All 2 results", ["- A — https://a", "- B <x> — https://b"])
+        path = Path(self._dir.name) / "traces" / "t.md"
+        summary = Path(self._dir.name) / "summary.md"
+        summary.write_text("existing\n", encoding="utf-8")
+        out = io.StringIO()
+        with mock.patch.dict("os.environ", {"GITHUB_STEP_SUMMARY": str(summary)}), contextlib.redirect_stdout(out):
+            publish_trace(trace, path)
+        printed = out.getvalue()
+        self.assertIn("- result: 2 result(s); top: A", printed)
+        self.assertNotIn("<details>", printed)
+        self.assertNotIn("https://b", printed)
+        page = summary.read_text(encoding="utf-8")
+        self.assertTrue(page.startswith("existing\n"))
+        self.assertIn("<details><summary>All 2 results</summary>", page)
+        self.assertIn("- B &lt;x&gt; — https://b", page)
+        self.assertEqual(path.read_text(encoding="utf-8"), trace.markdown())
+
+    def test_no_step_summary_outside_actions(self):
+        out = io.StringIO()
+        with mock.patch.dict("os.environ", {}, clear=True), contextlib.redirect_stdout(out):
+            publish_trace(Trace("t"), Path(self._dir.name) / "t.md")
+        self.assertIn("# t", out.getvalue())
 
 
 if __name__ == "__main__":
