@@ -795,6 +795,14 @@ class TestQuoteVerification(unittest.TestCase):
         longer = SER_QUOTE + " Early submissions are highly encouraged, and reviews will be conducted on a rolling basis."
         self.assertTrue(quote_found(longer, SER_FIXTURE))
 
+    def test_long_quote_found_on_the_loops_own_saved_fetch_of_ser2027(self):
+        # the search loop's web_fetch text, saved by run 3: the sentence is bold, with a markdown link
+        # (empty title) in the middle -- what refused this quote four times on run 2
+        page = (Path(__file__).resolve().parent / "fixtures" / "ser2027_loop_fetch.txt").read_text(encoding="utf-8")
+        self.assertIn('[conference submission portal](https://ser.eventsair.com/ser2027/symposiatrainingcourse "")', page)
+        self.assertTrue(quote_found(SER_QUOTE, page))
+        self.assertFalse(quote_found(SER_QUOTE.replace("7 October", "8 October"), page))
+
     def test_link_in_the_middle_of_the_sentence_does_not_block_it(self):
         self.assertTrue(quote_found(SER_QUOTE, SER_FETCHED))
         self.assertTrue(quote_found(SER_QUOTE, SER_FETCHED.replace(
