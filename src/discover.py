@@ -43,6 +43,7 @@ import datetime
 import html
 import json
 import re
+import sys
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -495,12 +496,31 @@ class Trace:
         self.tool_calls: Counter[str] = Counter()
         self._slots: dict[str, int] = {}  # placeholder line index, by key, still to be filled
         self._pending: dict[str, str] = {}  # server call id -> tool name, result not seen yet
+        # Display-only hook (the one exception to the 7 Oct freeze): when set,
+        # called as listener(event, data) as the trace is written, for live
+        # rendering (src/demo.py). It never changes what the trace records or
+        # what discovery does; a listener that raises is detached with a warning.
+        self.listener = None
+        self._call_numbers: dict[str, int] = {}  # call id -> number, for the listener
+        self._stated_before: dict[str, str | None] = {}  # decision call id -> inline reason, for the listener
+
+    def _emit(self, event: str, **data) -> None:
+        if self.listener is None:
+            return
+        try:
+            self.listener(event, data)
+        except Exception as exc:  # display only: never stop or change the run
+            print(f"[trace] WARNING: display listener failed ({type(exc).__name__}: {exc}) -- detached; "
+                  "the run and its trace continue unchanged", file=sys.stderr)
+            self.listener = None
 
     def add(self, *lines: str) -> None:
         self.lines.extend(lines)
+        self._emit("lines", lines=list(lines))
 
     def heading(self, text: str) -> None:
         self.lines += ["", f"## {text}", ""]
+        self._emit("heading", text=text)
 
     @staticmethod
     def _details_lines(summary: str, items: list[str]) -> list[str]:
@@ -579,8 +599,11 @@ class Trace:
         call_ids = {b.id for b in content if getattr(b, "type", "") in ("server_tool_use", "tool_use")}
         for result_id, result in results.items():
             if result_id not in call_ids and result_id in self._pending:
+                name = self._pending.pop(result_id)
                 self._fill(f"result:{result_id}",
-                           self._result_lines(self._pending.pop(result_id), result, " (arrived with the next response)"))
+                           self._result_lines(name, result, " (arrived with the next response)"))
+                self._emit("late_result", number=self._call_numbers.get(result_id), tool=name,
+                           summary=_result_summary(name, result)[0])
 
         texts = [b.text.strip() for b in content if getattr(b, "type", "") == "text" and b.text.strip()]
         if texts:
@@ -604,8 +627,9 @@ class Trace:
             single = len(calls) == 1
             if not single:
                 label = f"#{numbers[0]}–#{numbers[-1]}"
-                self.add(f"Reason stated before calls {label}: {reason}" if text
-                         else f"(no reason stated before calls {label})", "")
+                self.lines += [f"Reason stated before calls {label}: {reason}" if text
+                               else f"(no reason stated before calls {label})", ""]
+                self._emit("reason_group", first=numbers[0], last=numbers[-1], reason=reason if text else None)
             for number, block in zip(numbers, calls):
                 if block.type == "server_tool_use":
                     self._server_call(number, block, results.get(block.id), reason if single else None)
@@ -616,32 +640,42 @@ class Trace:
         inp = block.input if isinstance(block.input, dict) else {}
         target = (f"`{inp.get('query', '?')}`" if block.name == "web_search"
                   else inp.get("url", "?") if block.name == "web_fetch" else "")
-        self.add(f"**#{number} {block.name}** {target}".rstrip())
+        self.lines.append(f"**#{number} {block.name}** {target}".rstrip())
         if reason is not None:
-            self.add(f"- reason (before the call): {reason}")
+            self.lines.append(f"- reason (before the call): {reason}")
+        self._call_numbers[block.id] = number
         if result is None and block.name in ("web_search", "web_fetch"):
             self._pending[block.id] = block.name
             self._slot(f"result:{block.id}", PENDING_RESULT)
-            self.add("")
+            self.lines.append("")
+            summary = None
         else:
-            self.add(*self._result_lines(block.name, result), "")
+            self.lines += [*self._result_lines(block.name, result), ""]
+            summary = _result_summary(block.name, result)[0]
+        self._emit("server_call", number=number, tool=block.name, target=inp.get("query") or inp.get("url"),
+                   reason=reason, summary=summary)
 
     def _decision_slot(self, number: int, block, reason: str | None) -> None:
         args = block.input if isinstance(block.input, dict) else {}
         shown = {k: v for k, v in args.items() if k != "reason"}
-        self.add(f"**#{number} {block.name}** {json.dumps(shown, ensure_ascii=False)}")
+        self.lines.append(f"**#{number} {block.name}** {json.dumps(shown, ensure_ascii=False)}")
         if reason is not None:
-            self.add(f"- reason (before the call): {reason}")
+            self.lines.append(f"- reason (before the call): {reason}")
+        self._call_numbers[block.id] = number
+        self._stated_before[block.id] = reason
         self._slot(f"decision:{block.id}", "- code: (not handled)")
-        self.add("")
+        self.lines.append("")
 
     def decision(self, block_id: str, name: str, args: dict, reply: str, refused: bool) -> None:
         lines = [f"- reason (in the call): {args['reason']}"] if args.get("reason") else []
         lines.append(f"- {'REFUSED by code' if refused else 'code'}: {reply.splitlines()[0] if reply else ''}")
+        number = self._call_numbers.get(block_id)
         if not self._fill(f"decision:{block_id}", lines):  # a call response_blocks never saw
             number = self._number(name)
             shown = {k: v for k, v in args.items() if k != "reason"}
-            self.add(f"**#{number} {name}** {json.dumps(shown, ensure_ascii=False)}", *lines, "")
+            self.lines += [f"**#{number} {name}** {json.dumps(shown, ensure_ascii=False)}", *lines, ""]
+        self._emit("decision", number=number, tool=name, args=dict(args), reason=self._stated_before.pop(block_id, None),
+                   reason_in_call=args.get("reason"), reply=reply.splitlines()[0] if reply else "", refused=refused)
 
     def candidates(self, judged: list["Judgement"]) -> None:
         """The Candidates section: every record_result / accept_candidate

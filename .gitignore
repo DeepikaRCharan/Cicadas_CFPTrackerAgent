@@ -222,3 +222,6 @@ logs/
 
 # Cicadas: scratch tracker copies for local runs and demos (python -m src.scratch)
 scratch/
+
+# Cicadas: demo backups (python -m src.run --demo / python -m src.demo)
+runs/

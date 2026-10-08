@@ -46,6 +46,7 @@ this paper's cost, and the tool-call total.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import copy
 import datetime
 import json
@@ -445,6 +446,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--discovery-model", default=MODEL_DISCOVERY, choices=sorted(WEB_TOOL_TYPES),
                         help="model for the discovery loop only (hand-off models are unchanged)")
     parser.add_argument("--problems-out", help="write the run's failures here as JSON (for notify --run-problems)")
+    parser.add_argument("--demo", action="store_true",
+                        help="display only: stream the run in readable sections (src/demo.py), save runs/<date>_demo.md; "
+                             "the pipeline's own console output goes to logs/<stamp>_demo_stdout.log")
     args = parser.parse_args(argv)
     load_dotenv()
 
@@ -467,12 +471,30 @@ def main(argv: list[str] | None = None) -> int:
             write_problems(args.problems_out, True, [str(exc)])
         return EXIT_CRASHED
 
+    demo = None
+    with contextlib.ExitStack() as quiet:
+        if args.demo:  # display only -- nothing below behaves differently
+            from rich.console import Console
+
+            from src.demo import DemoSession, backup_path
+
+            demo = DemoSession(tracker, Console(file=sys.stdout, highlight=False))
+            log = Path(LOGS_DIR) / f"{now:%Y%m%dT%H%M%SZ}_demo_stdout.log"
+            log.parent.mkdir(parents=True, exist_ok=True)
+            quiet.enter_context(contextlib.redirect_stdout(quiet.enter_context(log.open("w", encoding="utf-8"))))
+        code = _run_papers(args, tracker, tracker_path, decisions, profiles, selected, now, limits, demo)
+    if demo is not None:
+        demo.finish(_usage_lines()[1], backup_path(now))
+    return code
+
+
+def _run_papers(args, tracker, tracker_path, decisions, profiles, selected, now, limits, demo) -> int:
     tracker.last_run = now
     sync_decisions(tracker, decisions, set(profiles))
     run = Run(tracker, tracker_path, profiles, decisions, now)
     run.save()
 
-    for profile_id in selected:
+    for index, profile_id in enumerate(selected, 1):
         profile = profiles[profile_id]
         stamp = now.strftime("%Y%m%dT%H%M%SZ")
         trace = Trace(f"Discovery trace: {profile_id}, {now:%Y-%m-%d %H:%M} UTC")
@@ -481,8 +503,12 @@ def main(argv: list[str] | None = None) -> int:
         usage_before = _usage_snapshot()
         judged, rechecked = [], 0
         outcomes = {k: 0 for k in ("created", "updated", "flagged", "skipped", "not_tracked", "failed")}
+        started = False
         try:
             run.ensure_classified(profile)
+            if demo is not None:
+                demo.start_paper(index, len(selected), profile_id, profile.title, tracker.profiles[profile_id])
+                trace.listener, started = demo.listener, True
             result = discover(profile, tracker.profiles[profile_id], tracker, trace=trace, today=run.today,
                               limits=limits, model=args.discovery_model, log_dir=LOGS_DIR)
             judged = result.judged
@@ -493,7 +519,10 @@ def main(argv: list[str] | None = None) -> int:
             for candidate in result.candidates:
                 outcome = run.hand_off(profile, candidate, trace, result.fetched_text)
                 outcomes[outcome] = outcomes.get(outcome, 0) + 1
-                handed.add(lookup_venue(tracker, candidate.name, candidate.year, candidate.call_page_url).conference_id)
+                conference_id = lookup_venue(tracker, candidate.name, candidate.year, candidate.call_page_url).conference_id
+                handed.add(conference_id)
+                if demo is not None:
+                    demo.handoff(conference_id, profile_id, outcome, candidate.name)
             rechecked = run.recheck(profile, trace, skip_ids=handed)
         except Exception as exc:
             run.fail_paper(trace, profile_id, exc)
@@ -507,7 +536,10 @@ def main(argv: list[str] | None = None) -> int:
                 trace.heading("Failures")
                 trace.add(*(f"- {f}" for f in failures))
             trace.add("", summary_line(profile_id, judged, outcomes, rechecked, trace.tool_calls, cost, len(failures)))
+            trace.listener = None
             publish_trace(trace, trace_path)
+            if started:
+                demo.paper_done()
 
     run.save()
     print(f"[run] done: {len(tracker.conferences)} tracked venue(s), {len(run.failures)} failure(s) -> {tracker_path}")
