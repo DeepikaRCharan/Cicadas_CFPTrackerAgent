@@ -476,9 +476,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.demo:  # display only -- nothing below behaves differently
             from rich.console import Console
 
-            from src.demo import DemoSession, backup_path
+            from src.demo import DemoSession, backup_path, llm_usage
 
-            demo = DemoSession(tracker, Console(file=sys.stdout, highlight=False))
+            demo = DemoSession(tracker, Console(file=sys.stdout, highlight=False), usage_fn=llm_usage)
             log = Path(LOGS_DIR) / f"{now:%Y%m%dT%H%M%SZ}_demo_stdout.log"
             log.parent.mkdir(parents=True, exist_ok=True)
             quiet.enter_context(contextlib.redirect_stdout(quiet.enter_context(log.open("w", encoding="utf-8"))))

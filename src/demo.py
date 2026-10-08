@@ -17,9 +17,13 @@ trace Markdown into the same events. Either way the same renderer draws:
    page not read, closed, incomplete ...).
 4. Scoring -- per venue, its bucket(s) and theme/genre/format scores, one line each.
 
-Then a results table (sorted by overall score; rows clearing the 50% threshold
-highlighted), and a Markdown copy of everything in runs/<date>_demo.md as a
-backup. Styling is for large terminal fonts: no dimmed text, one column of
+Throughout, a running counter -- steps (tool calls), model calls, tokens and
+dollars -- sits in a footer on a terminal, refreshed live, and is printed as a
+checkpoint after Searching and Scoring. Then a results table (sorted by
+overall score; rows clearing the 50% threshold highlighted), a final totals
+line, and a Markdown copy of everything in runs/<date>_demo.md as a backup.
+Live, tokens and dollars come from the run's own usage meter (src/llm.py);
+replayed, only per paper, from each trace's usage lines. Styling is for large terminal fonts: no dimmed text, one column of
 flowing text, a compact table.
 """
 
@@ -30,11 +34,13 @@ import datetime
 import json
 import re
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from rich import box
 from rich.console import Console
+from rich.live import Live
 from rich.padding import Padding
 from rich.rule import Rule
 from rich.table import Table
@@ -139,6 +145,28 @@ class Row:
 
 
 @dataclass
+class Usage:
+    model_calls: int = 0
+    tokens: int = 0  # input + output + cache writes + cache reads: every token the API processed
+    cost: float = 0.0
+
+    def __add__(self, other: "Usage") -> "Usage":
+        return Usage(self.model_calls + other.model_calls, self.tokens + other.tokens, self.cost + other.cost)
+
+
+def llm_usage() -> Usage:
+    """The run's usage so far, from src/llm.py's per-model meter."""
+    from src.llm import USAGE, usage_cost
+
+    total = Usage()
+    for model, t in USAGE.items():
+        total += Usage(t["calls"], t["input_tokens"] + t["output_tokens"] + t["cache_write_tokens"] + t["cache_read_tokens"],
+                       usage_cost(model, t["input_tokens"], t["output_tokens"], t["cache_write_tokens"],
+                                  t["cache_read_tokens"], t["searches"]))
+    return total
+
+
+@dataclass
 class DemoSession:
     """Draws the demo from events (live hook or replayed trace) and tracker
     entries, to the terminal and to a Markdown backup."""
@@ -151,6 +179,39 @@ class DemoSession:
     _decisions: list[dict] = field(default_factory=list)
     _handed: list[tuple[str, str, str]] = field(default_factory=list)  # (conference id or name, profile id, outcome)
     _paper: str = ""
+    usage_fn: Callable[[], Usage] | None = None  # live: llm_usage; replay: None (per-paper figures set by replay)
+    steps: int = 0  # tool calls seen: searches, fetches and the model's decisions
+    replay_usage: Usage = field(default_factory=Usage)
+    _live: Live | None = None
+
+    # --- the running counter ---
+
+    def usage(self) -> Usage:
+        return self.usage_fn() if self.usage_fn is not None else self.replay_usage
+
+    def counter_text(self, label: str = "Running total") -> str:
+        u = self.usage()
+        return (f"{label}: {self.steps} steps | {u.model_calls} model calls | {u.tokens:,} tokens | "
+                f"${u.cost:.3f} spent")
+
+    def _footer(self) -> Text:
+        return Text(f" {self.counter_text()} ", style="bold white on blue")
+
+    def _start_live(self) -> None:
+        """A footer that stays at the bottom of a terminal while sections
+        print above it (not on a file or a pipe -- the checkpoints cover those)."""
+        if self._live is None and self.console.is_terminal:
+            self._live = Live(console=self.console, get_renderable=self._footer, refresh_per_second=4,
+                              transient=True, redirect_stdout=False, redirect_stderr=False)
+            self._live.start()
+
+    def _stop_live(self) -> None:
+        if self._live is not None:
+            self._live.stop()
+            self._live = None
+
+    def _checkpoint(self) -> None:
+        self._say(Text(self.counter_text(), style="bold blue"), f"_{self.counter_text()}_")
 
     # --- output helpers: every line goes to the terminal and the Markdown copy ---
 
@@ -179,6 +240,7 @@ class DemoSession:
     # --- a paper ---
 
     def start_paper(self, index: int, total: int, profile_id: str, title: str, classification) -> None:
+        self._start_live()
         self._paper, self._mode, self._decisions, self._handed = profile_id, "search", [], []
         self.console.print()
         self.console.print(Rule(Text(f" Paper {index} of {total}: {profile_id} ", style="bold white on blue"), style="blue"))
@@ -222,6 +284,7 @@ class DemoSession:
         self._item(f"Reason for #{data['first']}-#{data['last']}:", "bold green", reason)
 
     def _on_server_call(self, data: dict) -> None:
+        self.steps += 1
         kind = {"web_search": "Search", "web_fetch": "Fetch"}.get(data["tool"], data["tool"])
         self._item(f"#{data['number']} {kind}:", "bold cyan", str(data["target"] or ""))
         if data.get("reason"):
@@ -232,6 +295,7 @@ class DemoSession:
         self._detail(f"#{data['number']} result arrived: {_short_summary(data['summary'])}")
 
     def _on_decision(self, data: dict) -> None:
+        self.steps += 1
         if data["tool"] in ("record_result", "accept_candidate"):
             self._decisions.append(data)
         elif data["tool"] == "finish" and not data["refused"]:
@@ -240,6 +304,7 @@ class DemoSession:
     # --- verifying ---
 
     def _verifying(self) -> None:
+        self._checkpoint()
         self._section(3, "Verifying")
         if not self._decisions:
             self._say("No results were judged.")
@@ -315,6 +380,7 @@ class DemoSession:
                 self.rows.append(row)
         if not scored:
             self._say("No venue was scored for this paper.")
+        self._checkpoint()
 
     # --- results ---
 
@@ -322,6 +388,7 @@ class DemoSession:
         return _results_table(rows, self.console.width)
 
     def finish(self, cost: float | None = None, md_path: Path | None = None, cost_label: str = "this run") -> Path | None:
+        self._stop_live()
         rows = sorted(self.rows, key=lambda r: (r.overall is None, -(r.overall or 0), r.venue))
         self.console.print()
         self.console.print(Rule(Text(" Results ", style="bold white on blue"), style="blue"))
@@ -340,6 +407,10 @@ class DemoSession:
             self._say(Text(f"{cleared} of {len(rows)} row(s) clear the {NEW_FIT_MIN}% threshold.", style="bold"))
         if cost is not None:
             self._say(Text(f"Estimated cost of {cost_label}: about ${cost:.2f} (list prices).", style="bold"))
+        u = self.usage()
+        totals = (f"TOTALS: {self.steps} steps, {u.model_calls} model calls, {u.tokens:,} tokens, "
+                  f"${u.cost:.3f} spent (list prices; the Console bill is authoritative)")
+        self._say(Text(totals, style="bold white on blue"), f"**{totals}**")
         if md_path is None:
             return None
         md_path.parent.mkdir(parents=True, exist_ok=True)
@@ -400,6 +471,7 @@ _GROUP = re.compile(r"^Reason stated before calls #(\d+)–#(\d+): (.*)$")
 _NO_GROUP = re.compile(r"^\(no reason stated before calls #(\d+)–#(\d+)\)$")
 _OUTCOME = re.compile(r"^- outcome: \*\*(created|updated)\*\* `([^`]+)`")
 _COST = re.compile(r"cost about \$([0-9.]+)")
+_USAGE = re.compile(r"^- \S+: (\d+) calls, ([\d,]+) in \(\+([\d,]+) cache write, ([\d,]+) cache read\) / ([\d,]+) out tokens.*about \$([0-9.]+)$")
 
 
 @dataclass
@@ -409,6 +481,7 @@ class ReplayedPaper:
     events: list[tuple[str, dict]]
     handoffs: list[tuple[str, str, str]]  # (conference id or name, outcome, name)
     cost: float | None
+    usage: Usage = field(default_factory=Usage)
 
 
 def parse_trace(text: str) -> ReplayedPaper:
@@ -419,6 +492,7 @@ def parse_trace(text: str) -> ReplayedPaper:
     events: list[tuple[str, dict]] = []
     handoffs: list[tuple[str, str, str]] = []
     cost = None
+    usage = Usage()
     i, in_details, section, venue = 0, False, "", ""
     while i < len(lines):
         line = lines[i]
@@ -430,7 +504,11 @@ def parse_trace(text: str) -> ReplayedPaper:
             section = line[3:]
             if not section.startswith(("Turn ", "Stopped", "Candidates", "Usage", "Failures", "Re-check")):
                 events.append(("heading", {"text": section}))
-        elif section == "Candidates" or section.startswith(("Usage", "Re-check")):
+        elif section.startswith("Usage"):
+            if (u := _USAGE.match(line)):
+                n = [int(g.replace(",", "")) for g in u.groups()[:5]]
+                usage += Usage(n[0], n[1] + n[2] + n[3] + n[4], float(u.group(6)))
+        elif section == "Candidates" or section.startswith("Re-check"):
             pass
         elif section.startswith("Hand-off"):
             if line.startswith("### "):
@@ -485,7 +563,7 @@ def parse_trace(text: str) -> ReplayedPaper:
         if (m := _COST.search(line)) and line.startswith("**Summary for"):
             cost = float(m.group(1))
         i += 1
-    return ReplayedPaper(profile_id, title, events, handoffs, cost)
+    return ReplayedPaper(profile_id, title, events, handoffs, cost, usage)
 
 
 def latest_traces(directory: str | Path = TRACES_DIR) -> list[Path]:
@@ -499,6 +577,9 @@ def latest_traces(directory: str | Path = TRACES_DIR) -> list[Path]:
 def replay(trace_paths: list[Path], tracker: TrackerFile, md_path: Path | None, console: Console | None = None) -> DemoSession:
     session = DemoSession(tracker, console or Console(highlight=False))
     papers = [parse_trace(p.read_text(encoding="utf-8")) for p in trace_paths]
+    session._say(Text("Replay: steps update as they happen; tokens and dollars are known only per paper, from each "
+                      "trace's usage lines.", style="bold"),
+                 "_Replay: steps update as they happen; tokens and dollars are known only per paper, from each trace's usage lines._")
     total_cost = 0.0
     for index, paper in enumerate(papers, 1):
         classification = tracker.profiles.get(paper.profile_id)
@@ -510,6 +591,7 @@ def replay(trace_paths: list[Path], tracker: TrackerFile, md_path: Path | None, 
             session.listener(event, data)
         for conference_id, outcome, name in paper.handoffs:
             session.handoff(conference_id, paper.profile_id, outcome, name)
+        session.replay_usage += paper.usage  # known only per paper, from the trace's usage lines
         session.paper_done()
         total_cost += paper.cost or 0.0
     session.finish(total_cost, md_path, "the replayed run (from its traces; this replay made no API calls)")

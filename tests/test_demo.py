@@ -160,5 +160,49 @@ class TestRunDemoFlag(unittest.TestCase):
             self.assertEqual(len(list((root / "traces").glob("*.md"))), 2)  # traces written exactly as without --demo
 
 
+class TestRunningCounter(RendererTestCase):
+    def test_steps_count_every_tool_call_and_usage_comes_from_the_meter(self):
+        live = []
+        run_scenario(lambda kind, data: live.append((kind, data)))
+        calls = sum(1 for kind, _ in live if kind in ("server_call", "decision"))
+        self.session.usage_fn = lambda: demo.Usage(7, 123_456, 0.0789)
+        self.paper(fx.IMMUNE, [("eci-2027", "updated")], live)
+        self.assertEqual(self.session.steps, calls)
+        self.assertIn(f"Running total: {calls} steps | 7 model calls | 123,456 tokens | $0.079 spent", self.out.getvalue())
+
+    def test_checkpoints_after_searching_and_scoring_and_a_totals_line(self):
+        self.session.usage_fn = lambda: demo.Usage(3, 1_000, 0.01)
+        self.paper(fx.IMMUNE, [("eci-2027", "updated")])
+        self.session.finish(None, self.md_path)
+        text = self.out.getvalue()
+        first, second = [i for i in range(len(text)) if text.startswith("Running total:", i)][:2]
+        self.assertLess(first, text.index("3. Verifying"))
+        self.assertGreater(second, text.index("4. Scoring"))
+        self.assertIn("TOTALS: 0 steps, 3 model calls, 1,000 tokens, $0.010 spent", text)
+        md = self.md_path.read_text(encoding="utf-8")
+        self.assertIn("_Running total: 0 steps | 3 model calls | 1,000 tokens | $0.010 spent_", md)
+        self.assertIn("**TOTALS: 0 steps, 3 model calls, 1,000 tokens, $0.010 spent", md)
+
+    def test_no_footer_on_a_file_or_pipe(self):
+        self.paper(fx.IMMUNE, [("eci-2027", "updated")])
+        self.assertIsNone(self.session._live)  # StringIO is not a terminal; the checkpoints cover it
+
+    def test_replay_reads_per_paper_usage_from_the_trace(self):
+        trace = (Path(__file__).resolve().parent.parent / "traces" / "20261007T054110Z_elephant-corridors.md").read_text(encoding="utf-8")
+        usage = parse_trace(trace).usage
+        # haiku 10 calls 6,500+53,939+188,310+3,340 tokens $0.159; sonnet 4 calls 12,447+1,840 tokens $0.043
+        self.assertEqual((usage.model_calls, usage.tokens), (14, 6_500 + 53_939 + 188_310 + 3_340 + 12_447 + 1_840))
+        self.assertAlmostEqual(usage.cost, 0.202, places=6)
+
+    def test_llm_usage_reads_the_runs_meter(self):
+        from src import llm
+        with mock.patch.dict(llm.USAGE, {"claude-haiku-4-5-20251001": dict(
+                calls=2, input_tokens=1000, output_tokens=100, cache_write_tokens=0, cache_read_tokens=0, searches=1, fetches=0)},
+                clear=True):
+            u = demo.llm_usage()
+        self.assertEqual((u.model_calls, u.tokens), (2, 1100))
+        self.assertAlmostEqual(u.cost, 1000 / 1e6 * 1.0 + 100 / 1e6 * 5.0 + 0.01)
+
+
 if __name__ == "__main__":
     unittest.main()
