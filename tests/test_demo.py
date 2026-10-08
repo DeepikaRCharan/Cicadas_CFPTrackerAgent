@@ -78,7 +78,7 @@ class TestRenderer(RendererTestCase):
     def test_four_sections_in_order(self):
         self.paper(fx.IMMUNE, [("eci-2027", "updated")])
         text = self.out.getvalue()
-        positions = [text.index(t) for t in ("1. Reading the paper", "2. Searching", "3. Verifying", "4. Scoring")]
+        positions = [text.index(t) for t in ('1. Reading the paper (agent judgment)', '2. Searching (agent-directed)', '3. Verifying (code-checked)', '4. Scoring (agent judgment)')]
         self.assertEqual(positions, sorted(positions))
         self.assertIn("Read as:", text)
         self.assertIn("Theme 96:", text)
@@ -150,7 +150,7 @@ class TestRunDemoFlag(unittest.TestCase):
                                  "--traces-dir", str(root / "traces")])
             self.assertEqual(code, 0)
             shown = out.getvalue()
-            for title in ("Paper 1 of 2", "Paper 2 of 2", "1. Reading the paper", "2. Searching", "3. Verifying", "4. Scoring",
+            for title in ("Paper 1 of 2", "Paper 2 of 2", '1. Reading the paper (agent judgment)', '2. Searching (agent-directed)', '3. Verifying (code-checked)', '4. Scoring (agent judgment)',
                           "Results", "cue a"):
                 self.assertIn(title, shown)
             self.assertNotIn("[run] trace written", shown)  # the pipeline's own output went to the log
@@ -176,8 +176,8 @@ class TestRunningCounter(RendererTestCase):
         self.session.finish(None, self.md_path)
         text = self.out.getvalue()
         first, second = [i for i in range(len(text)) if text.startswith("Running total:", i)][:2]
-        self.assertLess(first, text.index("3. Verifying"))
-        self.assertGreater(second, text.index("4. Scoring"))
+        self.assertLess(first, text.index("3. Verifying (code-checked)"))
+        self.assertGreater(second, text.index("4. Scoring (agent judgment)"))
         self.assertIn("TOTALS: 0 steps, 3 model calls, 1,000 tokens, $0.010 spent", text)
         md = self.md_path.read_text(encoding="utf-8")
         self.assertIn("_Running total: 0 steps | 3 model calls | 1,000 tokens | $0.010 spent_", md)

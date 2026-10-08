@@ -11,11 +11,11 @@ Live, it listens to the Trace display hook (src/discover.py, `Trace.listener`)
 and to the hand-off results run.py hands it; replayed, it parses the saved
 trace Markdown into the same events. Either way the same renderer draws:
 
-1. Reading the paper -- the bucket the paper was read as, its cues, the reasoning.
-2. Searching -- each search and fetch as it happens, with the model's stated reason.
-3. Verifying -- each candidate accepted or rejected, and why (quote mismatch,
+1. Reading the paper (agent judgment) -- the bucket the paper was read as, its cues, the reasoning.
+2. Searching (agent-directed) -- each search and fetch as it happens, with the model's stated reason.
+3. Verifying (code-checked) -- each candidate accepted or rejected, and why (quote mismatch,
    page not read, closed, incomplete ...).
-4. Scoring -- per venue, its bucket(s) and theme/genre/format scores, one line each.
+4. Scoring (agent judgment) -- per venue, its bucket(s) and theme/genre/format scores, one line each.
 
 Throughout, a running counter -- steps (tool calls), model calls, tokens and
 dollars -- sits in a footer on a terminal, refreshed live, and is printed as a
@@ -246,14 +246,14 @@ class DemoSession:
         self.console.print(Rule(Text(f" Paper {index} of {total}: {profile_id} ", style="bold white on blue"), style="blue"))
         self.md += ["", f"## Paper {index} of {total}: {profile_id}", ""]
         self._say(Text(title, style="bold"), f"**{title}**")
-        self._section(1, "Reading the paper")
+        self._section(1, "Reading the paper (agent judgment)")
         buckets = ", ".join(BUCKETS[b] for b in classification.paper_bucket)
         self._item("Read as:", "bold yellow", buckets)
         self._say(Text("Cues that drove that call:", style="bold"), "- **Cues that drove that call:**")
         for cue in classification.paper_bucket_cues:
             self._detail(cue)
         self._item("Reasoning:", "bold", " ".join(classification.paper_bucket_reasoning.split()))
-        self._section(2, "Searching")
+        self._section(2, "Searching (agent-directed)")
         self._say(Text("Each search and fetch as the model makes it. Call numbers skip its decisions -- those are under Verifying."),
                   "_Each search and fetch as the model makes it. Call numbers skip its decisions -- those are under Verifying._")
 
@@ -305,7 +305,7 @@ class DemoSession:
 
     def _verifying(self) -> None:
         self._checkpoint()
-        self._section(3, "Verifying")
+        self._section(3, "Verifying (code-checked)")
         if not self._decisions:
             self._say("No results were judged.")
         for d in self._decisions:
@@ -352,7 +352,7 @@ class DemoSession:
     def paper_done(self) -> None:
         if self._mode != "handoff":  # discovery stopped before the hand-off heading
             self._verifying()
-        self._section(4, "Scoring")
+        self._section(4, "Scoring (agent judgment)")
         scored = 0
         for conference_id, profile_id, outcome in self._handed:
             entry = next((c for c in self.tracker.conferences if c.id == conference_id), None)
