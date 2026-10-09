@@ -145,7 +145,7 @@ class TestRunDemoFlag(unittest.TestCase):
             out = io.StringIO()
             with mock.patch("src.run.discover", return_value=NS(candidates=[], fetched_text={}, judged=[])), \
                     mock.patch("src.run.LOGS_DIR", str(root / "logs")), mock.patch.object(demo, "RUNS_DIR", str(root / "runs")), \
-                    contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                    fx.fixture_profiles_live(), contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
                 code = run_main(["--demo", "--tracker", str(root / "tracker.json"), "--decisions", str(root / "decisions.json"),
                                  "--traces-dir", str(root / "traces")])
             self.assertEqual(code, 0)

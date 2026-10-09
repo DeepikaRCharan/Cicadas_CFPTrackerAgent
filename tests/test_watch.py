@@ -268,7 +268,7 @@ class TestDryRunAndCli(WatchTestCase):
 
     def test_cli_exit_codes(self):
         out = io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+        with fx.fixture_profiles_live(), contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
             ok = watch.main(["--tracker", str(self.path), "--decisions", str(self.decisions_path), "--today", "2026-10-07"])
             missing = watch.main(["--tracker", str(self.path.with_name("nope.json")), "--decisions", str(self.decisions_path)])
             self.write_decisions({ECI: "pending"})

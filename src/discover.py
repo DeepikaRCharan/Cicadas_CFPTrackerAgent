@@ -152,6 +152,14 @@ class Judgement:
 # --- Queries -------------------------------------------------------------------
 
 
+def conference_cycle_year(today: datetime.date) -> int:
+    """The year of the editions whose calls are open now. From July on, this
+    year's conferences have mostly closed their calls (the 2026-10-09 run's
+    "2026" seed found AIED 2026, deadline February 2026), so the upcoming
+    cycle is next year's."""
+    return today.year + 1 if today.month >= 7 else today.year
+
+
 def build_queries(
     profile: Profile, classification: ProfileClassification, today: datetime.date
 ) -> tuple[list[str], dict[VenueTier, str]]:
@@ -159,16 +167,15 @@ def build_queries(
 
     - Main: the first two keywords, each paired with one of the paper's own
       bucket's phrases, for every bucket the paper was classified into --
-      the first with the current year, the second with the next year (bare
-      seeds returned only published articles in live runs).
+      both with the upcoming conference cycle's year (bare seeds returned
+      only published articles in live runs).
     - Probes: one per other bucket -- the first keyword with that bucket's
       first phrase, no year."""
     topics = profile.keywords[:2]
-    years = (today.year, today.year + 1)
+    year = conference_cycle_year(today)
     main: list[str] = []
     for bucket in classification.paper_bucket:
-        main += [f"{topic} {phrase} {year}"
-                 for topic, phrase, year in zip(topics, BUCKET_VOCABULARY[bucket.value], years)]
+        main += [f"{topic} {phrase} {year}" for topic, phrase in zip(topics, BUCKET_VOCABULARY[bucket.value])]
     probes = {
         bucket: f"{topics[0]} {BUCKET_VOCABULARY[bucket.value][0]}"
         for bucket in VenueTier
@@ -253,6 +260,45 @@ def quote_found(quote: str, page_text: str) -> bool:
         return False
     # whole words only: "7 oct" must not match inside "7 october"
     return re.search(r"(?<!\w)" + re.escape(q) + r"(?!\w)", normalize_for_quote(page_text)) is not None
+
+
+_MONTHS = {m: i for i, name in enumerate(
+    ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october",
+     "november", "december"], 1) for m in (name, name[:3], name[:4])}
+_MONTH = r"([A-Za-z]{3,9})\.?"
+_DAY = r"(\d{1,2})(?:st|nd|rd|th)?"
+_DATE_PATTERNS = (
+    (re.compile(rf"\b{_DAY}\s+(?:of\s+)?{_MONTH},?\s+(\d{{4}})\b"), (1, 2, 3)),  # 19 October 2026
+    (re.compile(rf"\b{_MONTH}\s+{_DAY},?\s+(\d{{4}})\b"), (2, 1, 3)),  # October 19, 2026
+    (re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b"), None),  # 2026-10-19
+)
+
+
+def quote_dates(quote: str) -> list[datetime.date]:
+    """Every full date (day, month and year) written in a deadline quote.
+    A date without a day or year is skipped -- it can't say whether the
+    deadline has passed."""
+    found = []
+    for pattern, order in _DATE_PATTERNS:
+        for m in pattern.finditer(quote):
+            try:
+                if order is None:
+                    found.append(datetime.date(int(m[1]), int(m[2]), int(m[3])))
+                    continue
+                day, month, year = (m[i] for i in order)
+                if month.lower() in _MONTHS:
+                    found.append(datetime.date(int(year), _MONTHS[month.lower()], int(day)))
+            except ValueError:  # 31 February
+                continue
+    return found
+
+
+def _direct_page_text(url: str) -> str:
+    """The page fetched by code, outside the loop (no API cost), with
+    navigation, header and footer stripped -- as the hand-off reads it."""
+    from src.extract import fetch_page, html_to_text
+
+    return html_to_text(fetch_page(url))
 
 
 def fetched_page(result_content) -> tuple[bool, str | None, int]:
@@ -388,7 +434,8 @@ CLIENT_TOOLS = [
 def _paper_block(profile, classification, today) -> str:
     buckets = ", ".join(BUCKET_LABELS[b] for b in classification.paper_bucket)
     return (
-        f"Today's date: {today.isoformat()}\n\n"
+        f"Today's date: {today.isoformat()}. The upcoming conference cycle is {conference_cycle_year(today)}. "
+        "A call whose deadline is before today is closed: record it stale, don't accept it.\n\n"
         f"Paper: {profile.title}\n\nAbstract:\n{profile.abstract}\n\n"
         f"Keywords: {', '.join(profile.keywords)}\n\n"
         f"Cicadas classified this paper as: {buckets}\n"
@@ -903,14 +950,19 @@ def _project_next_turn(state: _State) -> float:
     """Plausible cost of the next turn, from the budget actually left: the
     searches and fetches it could still make (capped at the most one turn has
     been seen to make), one cached re-read of the conversation per server
-    pass (1 + each of those), their results written to the cache, a turn's
-    output, and the search fees. With no searches left, the projection has
-    no search cost at all."""
+    pass, their results written to the cache, a turn's output, and the search
+    fees. With no searches left, the projection has no search cost at all.
+
+    Calls made together share a pass: the 2026-10-09 run's turn with two
+    fetches re-read its context twice, not three times, and its turn with two
+    searches once past the opening. So a pass for the opening, one for a
+    batch of searches and one for a batch of fetches -- at most 3, not one
+    per call."""
     from src.llm import usage_cost
 
     searches = min(state.searches_left(), DISCOVERY_SEARCHES_PER_TURN_EST)
     fetches = min(state.fetches_left(), DISCOVERY_FETCHES_PER_TURN_EST)
-    passes = 1 + searches + fetches
+    passes = 1 + (searches > 0) + (fetches > 0)
     context = max(state.context_tokens, 5_000)  # the opening alone is a few thousand tokens
     new_tokens = searches * DISCOVERY_SEARCH_RESULT_TOKENS_EST + fetches * DISCOVERY_FETCH_MAX_CONTENT_TOKENS + 2_000
     return usage_cost(state.model, 0, DISCOVERY_TURN_OUTPUT_TOKENS_EST, cache_write_tokens=new_tokens,
@@ -929,9 +981,9 @@ def _log_limits(state: _State, trace: Trace) -> None:
 
 
 class _Handlers:
-    def __init__(self, state, tracker, profile_id, trace, today: datetime.date):
+    def __init__(self, state, tracker, profile_id, trace, today: datetime.date, fetch_text=_direct_page_text):
         self.state, self.tracker, self.profile_id, self.trace = state, tracker, profile_id, trace
-        self.today = today
+        self.today, self.fetch_text = today, fetch_text
 
     def run(self, block) -> dict:
         args = block.input if isinstance(block.input, dict) else {}
@@ -1054,12 +1106,29 @@ class _Handlers:
         if not quote:
             return "not accepted: deadline_quote is empty -- copy the deadline wording from the page you read", True
         quote_page = next((u for u, t in zip(pages, texts) if t and quote_found(quote, t)), None)
+        checked_directly = ""
+        if quote_page is None and any(texts):
+            # The loop's copy is cut at DISCOVERY_FETCH_MAX_CONTENT_TOKENS: on a page
+            # with a long menu (EDUCON 2027, 2026-10-09) it ends before the post
+            # itself. Check the same pages fetched directly, menus stripped --
+            # the quote must still appear word for word.
+            for u in pages:
+                try:
+                    if quote_found(quote, self.fetch_text(u)):
+                        quote_page, checked_directly = u, " (on a direct fetch: the loop's copy was cut short)"
+                        break
+                except RuntimeError as exc:
+                    checked_directly += f" (direct fetch failed: {exc})"
         if quote_page is None:
             where = " or ".join(pages)
             if not any(texts):
                 return f"not accepted: no text was kept for {where} (e.g. a PDF), so the quote can't be checked", True
-            return (f"not accepted: deadline_quote {quote!r} does not appear on {where} -- copy the exact "
-                    "wording from the page, or don't accept it"), True
+            return (f"not accepted: deadline_quote {quote!r} does not appear on {where}{checked_directly} -- copy the "
+                    "exact wording from the page, or don't accept it"), True
+        dates = quote_dates(quote) if evidence in ("on_call_page", "on_dates_page") else []
+        if dates and max(dates) < self.today:
+            return (f"not accepted: deadline passed ({max(dates).isoformat()} is before today, "
+                    f"{self.today.isoformat()}) -- move on to other leads"), True
         candidate_id = lookup_venue(self.tracker, name, year, url).conference_id
         if any(lookup_venue(self.tracker, c.name, c.year, c.call_page_url).conference_id == candidate_id
                for c in state.candidates):
@@ -1067,7 +1136,7 @@ class _Handlers:
         state.candidates.append(Candidate(name, year, url, dates_url, evidence, args.get("reason", ""),
                                           conflict=status == "conflict", deadline_quote=quote, quote_page=quote_page))
         tail = " -- candidate limit now reached, discovery will end" if len(state.candidates) >= state.limits.candidates else ""
-        return f"accepted as {candidate_id!r} ({status}){tail}", False
+        return f"accepted as {candidate_id!r} ({status}){checked_directly}{tail}", False
 
     def _finish(self, args) -> tuple[str, bool]:
         state = self.state
@@ -1156,10 +1225,12 @@ def discover(
     model: str = MODEL_DISCOVERY,
     call=None,
     log_dir: str | Path | None = None,
+    fetch_text=_direct_page_text,
 ) -> DiscoveryResult:
     """Run discovery for one profile: the probe phase, then the main phase.
     Reads the tracker (for check_tracker) but never writes it. `call` is
-    call_llm unless a test injects a fake."""
+    call_llm, and `fetch_text` the direct page fetch a quote missing from the
+    loop's copy is checked against, unless a test injects fakes."""
     if call is None:
         from src.llm import call_llm as call
     limits = limits or Limits()
@@ -1167,7 +1238,7 @@ def discover(
     if model not in WEB_TOOL_TYPES:
         raise ValueError(f"no web tool versions configured for {model!r} (config.WEB_TOOL_TYPES)")
     state = _State(limits=limits, probes=probes, model=model, log_dir=Path(log_dir) if log_dir else None)
-    handlers = _Handlers(state, tracker, profile.id, trace, today)
+    handlers = _Handlers(state, tracker, profile.id, trace, today, fetch_text)
     probe_searches = min(len(probes), limits.probe_reserve, limits.searches)
 
     trace.add(

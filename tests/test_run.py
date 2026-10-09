@@ -258,7 +258,7 @@ class TestExitCodes(RunTestCase):
         bad.write_text('{"eci-2027": "pending"}', encoding="utf-8")
         problems = Path(self._dir.name) / "logs" / "run_problems.json"
         out = io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+        with fx.fixture_profiles_live(), contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
             code = run_main(["--tracker", str(self.path), "--decisions", str(bad), "--problems-out", str(problems)])
         self.assertEqual(code, EXIT_CRASHED)
         data = json.loads(problems.read_text(encoding="utf-8"))
@@ -281,7 +281,7 @@ class TestExitCodes(RunTestCase):
             return NS(candidates=[], fetched_text={}, judged=[])
 
         out = io.StringIO()
-        with mock.patch("src.run.discover", side_effect=fake_discover), contextlib.redirect_stdout(out),                 contextlib.redirect_stderr(out):
+        with mock.patch("src.run.discover", side_effect=fake_discover), fx.fixture_profiles_live(), contextlib.redirect_stdout(out),                 contextlib.redirect_stderr(out):
             code = run_main(["--tracker", str(self.path), "--decisions", str(decisions), "--problems-out", str(problems),
                              "--traces-dir", str(Path(self._dir.name) / "traces")])
         self.assertEqual(code, EXIT_PARTIAL)

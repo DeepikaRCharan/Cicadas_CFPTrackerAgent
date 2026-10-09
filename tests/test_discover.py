@@ -15,7 +15,8 @@ from types import SimpleNamespace as NS
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.discover import Limits, Trace, build_queries, discover, normalize_for_quote, probe_covered, quote_found
+from src.discover import (Limits, Trace, _project_next_turn, _State, build_queries, conference_cycle_year, discover,
+                          normalize_for_quote, probe_covered, quote_dates, quote_found)
 from src.tracker import record_paper_classification, upsert_venue
 from src.tracker_schema import TrackerFile, VenueTier
 from tests import render_fixtures as fx
@@ -55,6 +56,11 @@ def fetch(url, sid="f1", page=PAGE_TEXT):
            content=NS(type="web_fetch_result", url=url,
                       content=NS(title="Call for abstracts", source=NS(type="text", data=page)))),
     ]
+
+
+def no_direct_fetch(url):
+    """Tests never touch the network: the direct fetch finds nothing new."""
+    return ""
 
 
 def tool(tool_name, tid="t1", **inp):
@@ -119,11 +125,12 @@ class DiscoverTestCase(unittest.TestCase):
         record_paper_classification(self.tracker, fx.IMMUNE, self.classification)
         self.trace = Trace("test trace")
 
-    def run_loop(self, api, limits=None, model=None):
+    def run_loop(self, api, limits=None, model=None, fetch_text=None):
         kwargs = {"model": model} if model else {}
         with contextlib.redirect_stdout(io.StringIO()):
             return discover(self.profile, self.classification, self.tracker, trace=self.trace,
-                            today=TODAY, limits=limits or Limits(), call=api, **kwargs)
+                            today=TODAY, limits=limits or Limits(), call=api,
+                            fetch_text=fetch_text or no_direct_fetch, **kwargs)
 
     def seed_eci(self):
         with contextlib.redirect_stdout(io.StringIO()):
@@ -142,8 +149,8 @@ class DiscoverTestCase(unittest.TestCase):
 class TestQueries(DiscoverTestCase):
     def test_seed_queries_from_profile(self):
         main, probes = build_queries(self.profile, self.classification, TODAY)
-        # main seeds: current year, then next year; probes: no year
-        self.assertEqual(main, ["Regulatory T cells call for papers 2026", "Foxp3 call for abstracts 2027"])
+        # main seeds: the upcoming conference cycle (2027, in October 2026); probes: no year
+        self.assertEqual(main, ["Regulatory T cells call for papers 2027", "Foxp3 call for abstracts 2027"])
         self.assertEqual(set(probes), {VenueTier.INDUSTRY_TECHNICAL_MEDIA, VenueTier.CORPORATE_INSTITUTIONAL,
                                        VenueTier.OTHER_AVENUES})
         self.assertEqual(probes[VenueTier.CORPORATE_INSTITUTIONAL], "Regulatory T cells policy forum")
@@ -716,7 +723,7 @@ class TestMainPhaseReserve(DiscoverTestCase):
 
     def test_main_phase_never_skipped_for_cost_after_probes(self):
         # one probe turn far over its projection: main still gets its first turn
-        api = FakeAPI(costly(probes_turn(), 100_000), finish("main done"))
+        api = FakeAPI(costly(probes_turn(), 110_000), finish("main done"))
         result = self.run_loop(api)
         self.assertIn("PHASE 2 of 2", api.requests[1]["opening"])
         self.assertIn("main phase's first turn runs despite the loop cost limit", self.trace_text())
@@ -897,6 +904,90 @@ class TestCheckTrackerAlias(DiscoverTestCase):
         self.assertIn("code: tracked_open", text)
         self.assertIn("same URL and year and a similar name, so the same venue; this name is kept as an alias", text)
         self.assertNotIn("conflict", text)
+
+
+
+class TestFixesAfterRun20261009(DiscoverTestCase):
+    """The four problems in the 2026-10-09 ai-tutoring run."""
+
+    # (1) the spending check stopped the main phase at $0.116 of $0.22, projecting $0.105 for
+    # a turn when its real turns cost $0.005-$0.045
+    def test_projection_reads_context_once_per_batch_not_per_call(self):
+        state = _State(limits=Limits(), probes={})
+        state.start_phase("main", 3)
+        state.searches, state.fetches = 3, 2  # that run's state at the stop: 3 searches and 2 fetches left
+        state.context_tokens = 29_038
+        projected = _project_next_turn(state)
+        # opening + a search batch + a fetch batch: 3 re-reads of the context, not 6
+        self.assertAlmostEqual(projected, 0.0525 + 3 * 29_038 * 0.1e-6 + 0.005 + 0.03, places=6)
+        self.assertLess(0.116 + projected, Limits().cost_usd)  # that run would have carried on
+
+    # (2) EDUCON 2027: the loop's copy ended inside the site menu, before the post that states the deadline
+    def test_quote_missing_from_a_cut_short_copy_is_checked_on_a_direct_fetch(self):
+        url = "https://ieee-edusociety.org/post/educon-2027-call-abstracts"
+        menu = "- [About Awards](https://ieee-edusociety.org/awards/about-awards)" + chr(10)
+        menu *= 20
+        post = "Be part of the dialogue. Abstract submission deadline: 19 October 2026. Submit by 19 October 2026!"
+        educon = dict(name="EDUCON 2027", year=2027, call_page_url=url, dates_page_url=None,
+                      deadline_evidence="on_call_page", deadline_quote="Abstract submission deadline: 19 October 2026",
+                      reason="AI in education abstracts")
+        api = FakeAPI(response(fetch(url, page=menu), tool("accept_candidate", "a1", **educon)), finish())
+        result = self.run_loop(api, Limits(**SINGLE_PHASE), fetch_text=lambda u: menu + post)
+        self.assertEqual([c.name for c in result.candidates], ["EDUCON 2027"])
+        self.assertIn("on a direct fetch: the loop's copy was cut short", self.trace_text())
+
+        self.setUp()  # the direct fetch must still show the words: no loosening beyond that
+        api = FakeAPI(response(fetch(url, page=menu), tool("accept_candidate", "a1", **dict(
+            educon, deadline_quote="Abstracts due 19 October 2026"))), finish())
+        result = self.run_loop(api, Limits(**SINGLE_PHASE), fetch_text=lambda u: menu + post)
+        self.assertEqual(result.candidates, [])
+
+        self.setUp()  # a failed direct fetch refuses, and says so
+
+        def down(u):
+            raise RuntimeError(f"failed to fetch {u}: HTTP 503")
+        api = FakeAPI(response(fetch(url, page=menu), tool("accept_candidate", "a1", **educon)), finish())
+        result = self.run_loop(api, Limits(**SINGLE_PHASE), fetch_text=down)
+        self.assertEqual(result.candidates, [])
+        self.assertIn("direct fetch failed: failed to fetch", self.trace_text())
+
+    # (3) the seeds said "2026" in October 2026
+    def test_upcoming_cycle_year_and_today_in_the_opening(self):
+        self.assertEqual(conference_cycle_year(datetime.date(2026, 10, 9)), 2027)
+        self.assertEqual(conference_cycle_year(datetime.date(2027, 3, 1)), 2027)
+        api = FakeAPI(finish())
+        self.run_loop(api, Limits(**SINGLE_PHASE))
+        opening = api.requests[0]["opening"]
+        self.assertIn("Today's date: 2026-10-01. The upcoming conference cycle is 2027.", opening)
+        self.assertIn("Regulatory T cells call for papers 2027", opening)
+
+    # (4) AIED 2026 (deadline 2 February 2026) was accepted, then closed by the hand-off
+    def test_deadline_passed_refused_at_accept(self):
+        aied = dict(name="AIED 2026", year=2026, call_page_url="https://aied-conference.org/2026/call-for-paper",
+                    dates_page_url=None, deadline_evidence="on_call_page", deadline_quote="Papers deadline 2 February 2026",
+                    reason="AI in education")
+        page = "Papers deadline 2 February 2026. Conference in Seoul. " * 10
+        api = FakeAPI(response(fetch(aied["call_page_url"], page=page), tool("accept_candidate", "a1", **aied)), finish())
+        result = self.run_loop(api, Limits(**SINGLE_PHASE))
+        self.assertEqual(result.candidates, [])
+        self.assertIn("not accepted: deadline passed (2026-02-02 is before today, 2026-10-01) -- move on", self.trace_text())
+
+    def test_deadline_today_or_unreadable_date_still_accepted(self):
+        for quote in ("Deadline: 1 October 2026", "Deadline: October 2026"):  # today; no day -> can't tell
+            self.setUp()
+            page = f"Call for papers. {quote}. " * 20
+            api = FakeAPI(response(fetch(ECI["call_page_url"], page=page),
+                                   tool("accept_candidate", "a1", **dict(ECI, deadline_quote=quote))), finish())
+            self.assertEqual(len(self.run_loop(api, Limits(**SINGLE_PHASE)).candidates), 1, quote)
+
+    def test_quote_dates_formats(self):
+        d = datetime.date
+        self.assertEqual(quote_dates("Papers deadline 2 February 2026"), [d(2026, 2, 2)])
+        self.assertEqual(quote_dates("due October 19th, 2026"), [d(2026, 10, 19)])
+        self.assertEqual(quote_dates("Sept. 7 2026 and 2027-01-15"), [d(2026, 9, 7), d(2027, 1, 15)])
+        self.assertEqual(quote_dates("abstracts 26 Jan 2026; papers 2 Feb 2026"), [d(2026, 1, 26), d(2026, 2, 2)])
+        self.assertEqual(quote_dates("October 2026"), [])
+        self.assertEqual(quote_dates("31 February 2026"), [])
 
 
 if __name__ == "__main__":

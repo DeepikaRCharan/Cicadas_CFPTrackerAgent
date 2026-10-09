@@ -132,7 +132,7 @@ class TestCommandLine(NotifyTestCase):
     def run_main(self, *args, env=ENV):
         out, err = io.StringIO(), io.StringIO()
         with mock.patch.dict("os.environ", env, clear=True), mock.patch("src.notify.load_dotenv"), \
-                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                fx.fixture_profiles_live(), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = notify.main(["--tracker", str(self.path), *args])
         return code, out.getvalue(), err.getvalue()
 

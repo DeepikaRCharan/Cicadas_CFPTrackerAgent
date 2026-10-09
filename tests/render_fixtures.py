@@ -42,6 +42,9 @@ from src.tracker_schema import (
 )
 
 ROOT = Path(__file__).resolve().parent.parent
+# The tests' own copies of the profiles they use, so the suite doesn't depend
+# on which papers are live in profiles/.
+PROFILES = Path(__file__).resolve().parent / "fixtures" / "profiles"
 UTC = datetime.timezone.utc
 RUN_1 = datetime.datetime(2026, 10, 7, 9, 0, tzinfo=UTC)
 RUN_2 = datetime.datetime(2026, 11, 7, 9, 0, tzinfo=UTC)
@@ -52,9 +55,17 @@ IMMUNE = "immune-tolerance"
 ELEPHANT = "elephant-corridors"
 
 
+def fixture_profiles_live():
+    """For a test running a command-line main: its load_live_profiles()
+    reads the fixture copies, not whatever is live in profiles/ today."""
+    from unittest import mock
+
+    return mock.patch("src.config.PROFILES_DIR", str(PROFILES))
+
+
 def load_profiles() -> dict[str, Profile]:
     return {
-        pid: Profile.model_validate_json((ROOT / "profiles" / f"{pid}.json").read_text(encoding="utf-8"))
+        pid: Profile.model_validate_json((PROFILES / f"{pid}.json").read_text(encoding="utf-8"))
         for pid in (IMMUNE, ELEPHANT)
     }
 

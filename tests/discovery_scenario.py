@@ -29,6 +29,7 @@ from tests.test_discover import (
     fetch,
     fetch_call,
     fetch_result,
+    no_direct_fetch,
     response,
     search,
     text,
@@ -73,7 +74,7 @@ def run_scenario(listener=None) -> dict:
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
         result = discover(profile, classification, tracker, trace=trace, today=TODAY,
-                          limits=Limits(probe_turns=5), call=api)
+                          limits=Limits(probe_turns=5), call=api, fetch_text=no_direct_fetch)
     return {
         "markdown": trace.markdown(),
         "terminal": trace.terminal(),
