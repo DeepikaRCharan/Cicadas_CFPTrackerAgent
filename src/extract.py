@@ -21,7 +21,7 @@ from pydantic import ValidationError
 
 from src.config import MODEL_EXTRACTION
 from src.llm import call_llm
-from src.tracker_schema import ExtractionFacts, null_fact_fields
+from src.tracker_schema import CRITICAL_FACT_FIELDS, ExtractionFacts, facts_complete, null_fact_fields
 
 HARDCODED_URL = "https://eci2027.org/call-for-abstracts/"
 
@@ -347,14 +347,20 @@ def extract_facts_from_text(url: str, page_text: str, today: datetime.date | Non
         )
     tool_input = dict(tool_use_blocks[0].input)
 
-    # Which fields are null is a fact about the answer, not a judgment: code
-    # sets missing_fields from it rather than rejecting the venue over the
-    # model's list. The model's own list is kept in the log line below.
+    # Which fields are null, and so whether a required one is, are facts
+    # about the answer, not judgments: code sets missing_fields and complete
+    # from them rather than rejecting the venue over the model's own list or
+    # flag. What the model said is kept in the log lines below.
     computed = null_fact_fields(tool_input)
     if sorted(tool_input.get("missing_fields") or []) != computed:
         print(f"[extract] missing_fields set by code to {computed} (the model listed "
               f"{sorted(tool_input.get('missing_fields') or [])})")
     tool_input["missing_fields"] = computed
+    complete = facts_complete(tool_input)
+    if tool_input.get("complete") != complete:
+        print(f"[extract] complete set by code to {complete} (the model said {tool_input.get('complete')}; "
+              f"required fields missing: {sorted(set(computed) & CRITICAL_FACT_FIELDS)})")
+    tool_input["complete"] = complete
 
     return ExtractionFacts.model_validate(tool_input)
 

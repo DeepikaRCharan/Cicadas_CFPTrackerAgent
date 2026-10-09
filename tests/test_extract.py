@@ -73,10 +73,30 @@ class TestMissingFieldsComputedByCode(unittest.TestCase):
         self.assertEqual(facts.missing_fields, ["fees", "submission_opens"])
         self.assertNotIn("set by code", out)
 
-    def test_wrong_complete_is_still_rejected(self):
-        # only the list is computed; complete stays the model's claim, checked as before
-        with self.assertRaises(ValidationError):
-            extract_with(dict(CSEDU_INPUT, theme=None))
+
+class TestCompleteComputedByCode(unittest.TestCase):
+    def test_complete_claimed_with_a_required_field_null_is_corrected(self):
+        no_theme = dict(CSEDU_INPUT, theme=None)  # model still says complete=True
+        with self.assertRaises(ValidationError):  # as given, this would lose the venue
+            ExtractionFacts.model_validate(dict(no_theme, missing_fields=["fees", "submission_opens", "theme"]))
+        facts, out = extract_with(no_theme)
+        self.assertFalse(facts.complete)
+        self.assertIn("theme", facts.missing_fields)
+        self.assertIn("complete set by code to False (the model said True; required fields missing: ['theme'])", out)
+
+    def test_incomplete_claimed_with_only_optional_gaps_is_corrected(self):
+        facts, out = extract_with(dict(CSEDU_INPUT, complete=False))  # fees, submission_opens: optional only
+        self.assertTrue(facts.complete)
+        self.assertIn("complete set by code to True (the model said False; required fields missing: [])", out)
+
+    def test_null_deadline_while_has_deadline_is_incomplete(self):
+        facts, _ = extract_with(dict(CSEDU_INPUT, deadline=None, deadline_precision=None, deadline_as_stated=None))
+        self.assertFalse(facts.complete)
+        self.assertIn("deadline", facts.missing_fields)
+
+    def test_correct_flag_passes_without_a_note(self):
+        _, out = extract_with(CSEDU_INPUT)
+        self.assertNotIn("complete set by code", out)
 
 
 if __name__ == "__main__":

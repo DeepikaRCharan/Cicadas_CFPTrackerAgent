@@ -130,6 +130,13 @@ def null_fact_fields(facts: dict) -> list[str]:
     return sorted(missing)
 
 
+def facts_complete(facts: dict) -> bool:
+    """What complete must be: True iff no critical field (deadline while
+    has_deadline, theme, submission_type) is null -- optional gaps never
+    count. Like missing_fields, a fact extraction computes in code."""
+    return not set(null_fact_fields(facts)) & CRITICAL_FACT_FIELDS
+
+
 class ExtractionFacts(StrictModel):
     """The fact fields extraction (light model) fills. `venue_tier` and
     `venue_tier_reasoning` are classify's job, never extraction's (brief,
@@ -227,7 +234,7 @@ class ExtractionFacts(StrictModel):
             )
 
         critical_missing = expected_missing & CRITICAL_FACT_FIELDS
-        expected_complete = not critical_missing
+        expected_complete = facts_complete(self.model_dump())
         if self.complete != expected_complete:
             raise ValueError(
                 f"complete={self.complete} but critical fields missing={sorted(critical_missing)} — "
