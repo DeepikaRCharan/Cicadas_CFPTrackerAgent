@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import io
 import json
 import re
 import sys
@@ -52,6 +53,7 @@ from src.tracker_schema import AccessType, CallStatus, ConferenceEntry, OtherAve
 RUNS_DIR = "runs"
 WIDE = 120  # terminal columns at which the results table gets one column per field
 VENUE_MAX = 70  # characters of a venue name shown in the results table
+PROBLEM_MAX = 240  # characters of a run problem shown in the demo; the log keeps all of it
 BUCKETS = {
     VenueTier.ACADEMIC_PRACTITIONER: "Academic & Practitioner",
     VenueTier.INDUSTRY_TECHNICAL_MEDIA: "Industry & Technical Media",
@@ -387,7 +389,19 @@ class DemoSession:
     def _table(self, rows: list[Row]) -> Table:
         return _results_table(rows, self.console.width)
 
-    def finish(self, cost: float | None = None, md_path: Path | None = None, cost_label: str = "this run") -> Path | None:
+    def _problems(self, problems: list[tuple[str, str]]) -> None:
+        """The run's warnings and failures, one tidy line each, after the
+        totals; the full text is in the run's log."""
+        self.console.print()
+        self.console.print(Rule(Text(" Run problems ", style="bold white on red"), style="red"))
+        self.md += ["", "## Run problems", ""]
+        for source, message in problems:
+            short = message if len(message) <= PROBLEM_MAX else message[: PROBLEM_MAX - 3].rstrip() + "..."
+            self._item(f"[{source}]", "bold red", short, md_label=f"[{source}]")
+        self._say(Text("Full text in the run's log (logs/<stamp>_demo_stdout.log).", style="bold"))
+
+    def finish(self, cost: float | None = None, md_path: Path | None = None, cost_label: str = "this run",
+               problems: list[tuple[str, str]] | None = None) -> Path | None:
         self._stop_live()
         rows = sorted(self.rows, key=lambda r: (r.overall is None, -(r.overall or 0), r.venue))
         self.console.print()
@@ -411,12 +425,63 @@ class DemoSession:
         totals = (f"TOTALS: {self.steps} steps, {u.model_calls} model calls, {u.tokens:,} tokens, "
                   f"${u.cost:.3f} spent (list prices; the Console bill is authoritative)")
         self._say(Text(totals, style="bold white on blue"), f"**{totals}**")
+        if problems:
+            self._problems(problems)
         if md_path is None:
             return None
         md_path.parent.mkdir(parents=True, exist_ok=True)
         md_path.write_text("# Cicadas demo\n" + "\n".join(self.md) + "\n", encoding="utf-8")
         self.console.print(Text(f"Backup saved: {md_path}", style="bold"))
         return md_path
+
+
+class ProblemTap(io.TextIOBase):
+    """stderr during a --demo run: every character goes to the run's log in
+    full, and the lines are kept for the demo's Run problems section --
+    never to the terminal, where a warning would land mid-section and
+    displace the live footer (the duplicate "Running total" line)."""
+
+    def __init__(self, log):
+        self.log, self._text = log, ""
+
+    def writable(self) -> bool:
+        return True
+
+    def write(self, s: str) -> int:
+        self.log.write(s)
+        self._text += s
+        return len(s)
+
+    def flush(self) -> None:
+        if not self.log.closed:  # the tap outlives the log: it is read after the run
+            self.log.flush()
+
+    def problems(self) -> list[tuple[str, str]]:
+        return group_problems(self._text.splitlines())
+
+
+_TAGGED = re.compile(r"\[(\w+)\]\s*(?:WARNING:\s*)?(.*)")
+
+
+def group_problems(lines: list[str]) -> list[tuple[str, str]]:
+    """(source, message) per "[tracker] ..." / "[run] ..." line, with its
+    continuation lines joined on; Python tracebacks are left to the log."""
+    entries: list[list[str]] = []
+    in_traceback = False
+    for line in lines:
+        if line.startswith("Traceback (most recent call last)"):
+            in_traceback = True
+            continue
+        tagged = _TAGGED.match(line)
+        if tagged:
+            in_traceback = False
+            entries.append([tagged[1], tagged[2]])
+        elif line.strip() and not in_traceback:
+            if entries:
+                entries[-1][1] += " " + line.strip()
+            else:
+                entries.append(["stderr", line.strip()])
+    return [(source, " ".join(message.split())) for source, message in entries]
 
 
 def _num(value: int | None) -> str:

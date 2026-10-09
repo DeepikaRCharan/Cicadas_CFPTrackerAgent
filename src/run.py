@@ -448,7 +448,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--problems-out", help="write the run's failures here as JSON (for notify --run-problems)")
     parser.add_argument("--demo", action="store_true",
                         help="display only: stream the run in readable sections (src/demo.py), save runs/<date>_demo.md; "
-                             "the pipeline's own console output goes to logs/<stamp>_demo_stdout.log")
+                             "the pipeline's own console output, warnings included, goes to logs/<stamp>_demo_stdout.log, "
+                             "and warnings are listed under Run problems at the end")
     args = parser.parse_args(argv)
     load_dotenv()
 
@@ -476,15 +477,20 @@ def main(argv: list[str] | None = None) -> int:
         if args.demo:  # display only -- nothing below behaves differently
             from rich.console import Console
 
-            from src.demo import DemoSession, backup_path, llm_usage
+            from src.demo import DemoSession, ProblemTap, backup_path, llm_usage
 
             demo = DemoSession(tracker, Console(file=sys.stdout, highlight=False), usage_fn=llm_usage)
             log = Path(LOGS_DIR) / f"{now:%Y%m%dT%H%M%SZ}_demo_stdout.log"
             log.parent.mkdir(parents=True, exist_ok=True)
-            quiet.enter_context(contextlib.redirect_stdout(quiet.enter_context(log.open("w", encoding="utf-8"))))
+            log_file = quiet.enter_context(log.open("w", encoding="utf-8"))
+            quiet.enter_context(contextlib.redirect_stdout(log_file))
+            # warnings and failures: in full to the same log, and to the demo's
+            # Run problems section at the end -- not mid-section on the terminal
+            tap = ProblemTap(log_file)
+            quiet.enter_context(contextlib.redirect_stderr(tap))
         code = _run_papers(args, tracker, tracker_path, decisions, profiles, selected, now, limits, demo)
     if demo is not None:
-        demo.finish(_usage_lines()[1], backup_path(now))
+        demo.finish(_usage_lines()[1], backup_path(now), problems=tap.problems())
     return code
 
 

@@ -118,6 +118,18 @@ OPTIONAL_FACT_FIELDS = frozenset(
 )
 
 
+def null_fact_fields(facts: dict) -> list[str]:
+    """What missing_fields must hold: every null critical or optional fact
+    field, sorted. deadline counts only while has_deadline is true -- a null
+    deadline on a rolling call is a fact, not a gap. A fact about the
+    fields, so extraction computes it in code rather than trusting the
+    model's list (CSEDU 2027, 2026-10-09: listed fees, not submission_opens)."""
+    missing = {f for f in (CRITICAL_FACT_FIELDS | OPTIONAL_FACT_FIELDS) - {"deadline"} if facts.get(f) is None}
+    if facts.get("has_deadline") and facts.get("deadline") is None:
+        missing.add("deadline")
+    return sorted(missing)
+
+
 class ExtractionFacts(StrictModel):
     """The fact fields extraction (light model) fills. `venue_tier` and
     `venue_tier_reasoning` are classify's job, never extraction's (brief,
@@ -205,16 +217,7 @@ class ExtractionFacts(StrictModel):
 
     @model_validator(mode="after")
     def _missing_fields_and_complete(self) -> "ExtractionFacts":
-        expected_missing: set[str] = set()
-        if self.theme is None:
-            expected_missing.add("theme")
-        if self.submission_type is None:
-            expected_missing.add("submission_type")
-        if self.has_deadline and self.deadline is None:
-            expected_missing.add("deadline")
-        for field_name in OPTIONAL_FACT_FIELDS:
-            if getattr(self, field_name) is None:
-                expected_missing.add(field_name)
+        expected_missing = set(null_fact_fields(self.model_dump()))
 
         if set(self.missing_fields) != expected_missing:
             raise ValueError(

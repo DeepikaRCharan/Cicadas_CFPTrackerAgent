@@ -21,7 +21,7 @@ from pydantic import ValidationError
 
 from src.config import MODEL_EXTRACTION
 from src.llm import call_llm
-from src.tracker_schema import ExtractionFacts
+from src.tracker_schema import ExtractionFacts, null_fact_fields
 
 HARDCODED_URL = "https://eci2027.org/call-for-abstracts/"
 
@@ -345,7 +345,16 @@ def extract_facts_from_text(url: str, page_text: str, today: datetime.date | Non
             "model did not return a record_extraction_facts tool call "
             f"(stop_reason={response.stop_reason!r})"
         )
-    tool_input = tool_use_blocks[0].input
+    tool_input = dict(tool_use_blocks[0].input)
+
+    # Which fields are null is a fact about the answer, not a judgment: code
+    # sets missing_fields from it rather than rejecting the venue over the
+    # model's list. The model's own list is kept in the log line below.
+    computed = null_fact_fields(tool_input)
+    if sorted(tool_input.get("missing_fields") or []) != computed:
+        print(f"[extract] missing_fields set by code to {computed} (the model listed "
+              f"{sorted(tool_input.get('missing_fields') or [])})")
+    tool_input["missing_fields"] = computed
 
     return ExtractionFacts.model_validate(tool_input)
 

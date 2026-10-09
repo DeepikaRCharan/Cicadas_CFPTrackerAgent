@@ -159,6 +159,63 @@ class TestRunDemoFlag(unittest.TestCase):
             self.assertEqual(len(list((root / "runs").glob("*_demo.md"))), 1)
             self.assertEqual(len(list((root / "traces").glob("*.md"))), 2)  # traces written exactly as without --demo
 
+    def test_warnings_go_to_run_problems_at_the_end_and_in_full_to_the_log(self):
+        # rehearsal 2026-10-09_052551: [tracker]/[run] warnings landed mid-output on stderr
+        from src.run import main as run_main
+
+        def fake_discover(profile, *args, **kwargs):
+            if profile.id == fx.ELEPHANT:
+                raise RuntimeError("529 overloaded\nsecond line of detail")
+            return NS(candidates=[], fetched_text={}, judged=[])
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            tracker = TrackerFile()
+            for pid, profile in fx.load_profiles().items():
+                record_paper_classification(tracker, pid, fx._classification(profile, VenueTier.ACADEMIC_PRACTITIONER,
+                                                                             ["cue a", "cue b", "cue c"], "reasoning"))
+            save_tracker(tracker, root / "tracker.json")
+            (root / "decisions.json").write_text("{}", encoding="utf-8")
+            out, err = io.StringIO(), io.StringIO()
+            with mock.patch("src.run.discover", side_effect=fake_discover), \
+                    mock.patch("src.run.LOGS_DIR", str(root / "logs")), mock.patch.object(demo, "RUNS_DIR", str(root / "runs")), \
+                    fx.fixture_profiles_live(), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = run_main(["--demo", "--tracker", str(root / "tracker.json"), "--decisions", str(root / "decisions.json"),
+                                 "--traces-dir", str(root / "traces")])
+            self.assertEqual(code, 3)  # partial
+            self.assertEqual(err.getvalue(), "")  # nothing reached the terminal's stderr
+            shown = out.getvalue()
+            self.assertGreater(shown.index("Run problems"), shown.index("TOTALS:"))  # at the end
+            problems = shown[shown.index("Run problems"):]
+            self.assertIn("[tracker] The whole search for elephant-corridors failed", problems)
+            self.assertIn("[run] PARTIAL: 1 failure(s)", problems)
+            self.assertNotIn("WARNING:", problems)
+            self.assertNotIn("Traceback", shown)
+            self.assertEqual(shown.count("Running total:"), 4)  # two checkpoints per paper, no strays
+            log = next((root / "logs").glob("*_demo_stdout.log")).read_text(encoding="utf-8")
+            self.assertIn("[tracker] WARNING: The whole search for elephant-corridors failed", log)
+            self.assertIn("Traceback (most recent call last)", log)  # logged in full
+            self.assertIn("[run] PARTIAL", log)
+            md = next((root / "runs").glob("*_demo.md")).read_text(encoding="utf-8")
+            self.assertIn("## Run problems", md)
+            self.assertIn("RuntimeError: 529 overloaded second line of detail", md)  # continuation joined, one line
+
+    def test_group_problems_joins_continuations_and_skips_tracebacks(self):
+        lines = ["[tracker] WARNING: hand-off of CSEDU 2027 (2027) failed: ValidationError: 1 validation error",
+                 "  Value error, missing_fields ['fees'] must exactly equal ['fees', 'submission_opens']",
+                 "Traceback (most recent call last):", '  File "x.py", line 1', "RuntimeError: boom",
+                 "[run] PARTIAL: 1 failure(s)"]
+        self.assertEqual(demo.group_problems(lines), [
+            ("tracker", "hand-off of CSEDU 2027 (2027) failed: ValidationError: 1 validation error Value error, "
+                        "missing_fields ['fees'] must exactly equal ['fees', 'submission_opens']"),
+            ("run", "PARTIAL: 1 failure(s)")])
+
+    def test_clean_run_has_no_run_problems_section(self):
+        out = io.StringIO()
+        session = demo.DemoSession(TrackerFile(), Console(file=out, width=100, highlight=False))
+        session.finish(None, None, problems=[])
+        self.assertNotIn("Run problems", out.getvalue())
+
 
 class TestRunningCounter(RendererTestCase):
     def test_steps_count_every_tool_call_and_usage_comes_from_the_meter(self):
