@@ -40,7 +40,7 @@ RESEND_FROM = "Cicadas <onboarding@resend.dev>"
 # --- Discovery (build step 8) -----------------------------------------------
 
 # The discovery loop's model (overridable per run with --discovery-model). Haiku 4.5
-# since step 8 verification: it fits the per-profile ceiling; Sonnet 5
+# since step 8 verification: it keeps the loop inside its $0.22 cap; Sonnet 5
 # (dynamic-filtering web tools) is the alternative.
 MODEL_DISCOVERY = "claude-haiku-4-5-20251001"
 
@@ -58,10 +58,16 @@ LOGS_DIR = "logs"
 # Where each run's readable decision trace is written (committed, unlike logs/).
 TRACES_DIR = "traces"
 
-# Hard limits per profile per run, sized for a $0.30-per-profile ceiling
-# (loop + hand-off). Hitting one stops that resource (or the loop) cleanly
-# and is logged; there is no retry or fallback that could quietly spend past
-# them (CLAUDE.md: the spend cap is a backstop, not a plan).
+# Hard limits per profile per run, on the search loop. Hitting one stops that
+# resource (or the loop) cleanly and is logged; there is no retry or fallback
+# that could quietly spend past them. Only the loop's spend is capped
+# (DISCOVERY_MAX_LOOP_COST_USD): nothing caps a paper's total. Each scored
+# venue's hand-off -- extract (Haiku), classify the venue and two judge-fit
+# calls (Sonnet), each sending the venue's whole page -- adds roughly
+# $0.07-0.10 on pages of 15-24k characters (run 2026-10-09_062406), so a paper
+# typically costs about $0.20-$0.40, mostly driven by how many venues are
+# scored and how long their pages are. The Anthropic Console's monthly spend
+# cap is the only hard stop on total spending (CLAUDE.md).
 DISCOVERY_MAX_TURNS = 12
 DISCOVERY_MAX_SEARCHES = 6  # 3 main + 3 probes
 DISCOVERY_PROBE_RESERVE = 3  # of the searches, kept for one probe per other bucket
@@ -74,16 +80,17 @@ DISCOVERY_PROBE_MAX_TURNS = 4
 DISCOVERY_PROBE_MAX_FETCHES = 2
 # Half the loop spend ($0.11 of $0.22). The probe phase stops before a turn
 # whose projected cost would take it past its share, so the main phase starts
-# with at most $0.11 spent -- room for its first full turn (projected $0.0905
-# with 3 searches and 2 fetches left: $0.11 + $0.0905 <= $0.22). A smaller
+# with at most $0.11 spent -- room for its first full turn (projected $0.089
+# with 3 searches and 2 fetches left: $0.11 + $0.089 <= $0.22). A smaller
 # share can't fit even the first probe turn's projection.
 DISCOVERY_PROBE_COST_SHARE = 0.5  # of DISCOVERY_MAX_LOOP_COST_USD
 # Cap on how much of one fetched page enters the loop's context.
 DISCOVERY_FETCH_MAX_CONTENT_TOKENS = 5000
-# Estimated spend at which the loop stops (checked between turns, from the
-# API's usage report). Leaves room under the $0.30-per-profile ceiling for
-# the hand-off calls that follow.
-DISCOVERY_MAX_LOOP_COST_USD = 0.22  # same share of the ceiling as $0.18 of $0.25
+# The search loop's spend cap (checked between turns, from the API's usage
+# report): the loop stops before a turn projected to take it past this. The
+# main phase's first turn always runs, so the loop can overshoot by up to one
+# turn. Caps the loop only -- not the paper reading or the hand-off after it.
+DISCOVERY_MAX_LOOP_COST_USD = 0.22
 # For projecting the next turn's cost from the budget actually left (see
 # discover._project_next_turn): tokens one search's results add (measured
 # about 9.5k on the basic tool), a turn's output, and the most searches and
