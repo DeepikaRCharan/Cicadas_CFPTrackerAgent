@@ -57,14 +57,18 @@ Every file in the repo: what it does, which build step created it, and what kind
 | `tracker.json` | The agent's memory: every venue found, its facts, buckets, scores, notifications and decisions. Written only by the agent, and committed after each run. | Step 9 (empty file); filled by runs | Data |
 | `decisions.json` | The researcher's file: one line per conference saying `applying`, `applied` or `skipped`. The agent reads it and never writes it. | Schema v4 (before step 2) | Data |
 | `profiles/immune-tolerance.json` | Live paper profile 1: the immune-tolerance (Foxp3) paper, an unambiguous academic case. | Step 3 | Data |
-| `profiles/elephant-corridors.json` | Live paper profile 2: the elephant-corridors piece, the deliberately ambiguous case. | Step 3 | Data |
+| `profiles/ai-tutoring.json` | Live paper profile 2: Kestin et al. (*Scientific Reports*, 2025), the AI-tutoring RCT, used for the rehearsal run and the live demo. | Added 9 Oct | Data |
+| `profiles_retired/elephant-corridors.json` | Retired profile: the elephant-corridors piece (Gemini-generated), the intended ambiguous case. The loader doesn't read this folder; the profile's tracker entries stay frozen as history. | Step 3; retired 11 Oct | Data |
 | `requirements.txt` | The Python packages the agent needs. `rich` was added for the demo. | Before step 1 | Config |
 | `.env.example` | Template for the three secrets (`ANTHROPIC_API_KEY`, `RESEND_API_KEY`, `NOTIFY_TO`). The real `.env` is gitignored. | Step 1 | Config |
 | `.gitignore` | Keeps secrets, logs, scratch copies and demo backups out of git. | Initial commit | Config |
 | `CLAUDE.md` | Short orientation for Claude Code: the non-negotiables, pointing to the brief. | Before step 1 | Docs |
 | `docs/project-brief.md` | The spec: what Cicadas does, the data model, every settled rule, the build order and the Status log. | Before step 1 | Docs |
 | `docs/file-map.md` | This file. | Added 8 Oct | Docs |
-| `README.md` | Project summary, with sections on scheduled runs and on running locally against a scratch tracker. Its full rewrite is step 11. | Initial commit | Docs |
+| `README.md` | What Cicadas is and how it works, build vs. adopt, repo map, setup and running, evidence, guardrails and cost, authorship disclosure, limitations and next steps. | Initial commit; rewritten in step 11 | Docs |
+| `examples/README.md` | A short note on the two example files and the paper behind the `ai-tutoring` profile. | Step 11 | Docs |
+| `examples/rehearsal-run.md` | The demo output of the 2026-10-09 rehearsal run (`ai-tutoring`, scratch tracker). | Added 9 Oct | Display (record of an agent run) |
+| `examples/rehearsal-trace.md` | The same run's full discovery trace. | Step 11 | Display (record of an agent run) |
 
 ## Run traces (`traces/`)
 

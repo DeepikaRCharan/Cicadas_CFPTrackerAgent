@@ -12,7 +12,9 @@ Given a researcher's paper, Cicadas periodically finds conference and publicatio
 
 The instructor's explicit requirement: the agent must exercise real agency, not execute a script in a loop.
 
-The agency lives in two steps: **classify** (what bucket does this paper, and this venue, actually belong to) and **judge fit** (how well do they match, with the bucket steering how the kind of writing is judged). Neither is declared or configured anywhere — the agent reads unstructured content and forms the judgment itself, every run, with reasoning logged for both calls.
+The pipeline order is fixed in code on purpose, as a guardrail. The agentic loop lives inside it, in **discovery** (`src/discover.py`): Claude chooses each next action (search, fetch, accept, reject) based on what it just found, and code checks each decision before acting on it.
+
+**Classify** (what bucket does this paper, and this venue, actually belong to) and **judge fit** (how well do they match, with the bucket steering how the kind of writing is judged) are judgment calls rather than loops. Neither is declared or configured anywhere. The agent reads unstructured content and forms the judgment itself, every run, with reasoning logged for both calls.
 
 A rubric the researcher can see, or even wrote, does not make this less agentic — a rubric supplies criteria to reason with, not an answer to look up. What *would* break it: any dimension collapsing into a keyword match or a hardcoded threshold. Keep dimensions qualitative enough that the model has to read and weigh them. Do not "simplify" scoring into a numeric formula, even under time pressure — that's the one shortcut not available.
 
@@ -70,7 +72,9 @@ Each profile file: title, abstract, keywords/topics, a short `id`. **No preferre
 **Demo profiles:**
 
 1. The 2025 Nobel Prize–winning immune-tolerance paper (Sakaguchi et al., or another paper from that line of work) — real, published, not the researcher's own. Used as an unambiguous "academic" case.
-2. The elephant corridors piece — Gemini-generated, policy/design-summit angle. Intended as the ambiguous case; classify read it as Academic & Practitioner (its abstract is dense academic synthesis), and that honest result stands. Coverage of the non-academic buckets comes from the classify eval set, not from forcing this profile.
+2. Kestin et al., "AI tutoring outperforms in-class active learning" (*Scientific Reports*, 2025): real, published, not the researcher's own (`profiles/ai-tutoring.json`). Used for the rehearsal run and the live demo.
+
+**Retired:** the elephant corridors piece (`profiles_retired/elephant-corridors.json`). Gemini-generated, with a policy/design-summit angle. It was intended as the ambiguous case, but classify read it as Academic & Practitioner (its abstract is dense academic synthesis), and that honest result stands. Coverage of the non-academic buckets comes from the classify eval set, not from forcing this profile. It was swapped out for `ai-tutoring`, and its tracker entries stay frozen as history.
 
 See–Map–Speak is the researcher's own real work but is **not** one of the two live profiles — referenced in the README only (see Authorship disclosure below).
 
