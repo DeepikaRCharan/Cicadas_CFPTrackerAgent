@@ -10,6 +10,11 @@ Cicadas tracks venues and notifies. It never registers or pays for anything; the
 
 ## How it works
 
+Cicadas runs two ways:
+
+- **On a schedule.** GitHub Actions starts the monthly run on the 7th of each month, and a daily deadline watcher every day to send reminders and close calls whose deadlines have passed.
+- **On demand.** The same run can be started any time from the Actions tab, or locally with `python -m src.run` (see Setup and running). It's the same code path as the scheduled run.
+
 A monthly run ([`src/run.py`](src/run.py)) does these steps in this order:
 
 1. **Sync decisions.** Read `decisions.json` and copy the researcher's decisions into `tracker.json`.
@@ -23,9 +28,25 @@ A monthly run ([`src/run.py`](src/run.py)) does these steps in this order:
 9. **Trace.** Write a readable record of every search, fetch, decision and score to `traces/`.
 10. **Notify.** Render the digest from tracker fields with a fixed template and send it ([`src/render.py`](src/render.py), [`src/notify.py`](src/notify.py)).
 
-**The order is fixed on purpose.** It's a guardrail. Code sequences the pipeline, so the model can't skip verification, score a venue it never extracted, or write to the tracker on its own. The agency sits inside that frame, in discovery. There, a hand-written tool loop gives Claude four web and decision tools: `web_search`, `web_fetch`, `record_result` (a verdict on each result) and `accept_candidate`. Claude picks each next action based on what it just found: refine a query, fetch a promising page, reject a stale or off-topic result, or accept a live call. Discovery runs in two phases, also sequenced by code. First comes one probe search for each venue type the paper was *not* classified as, so real venues can test the classification. Then come the main searches for the paper's own type.
+**The order is fixed on purpose.** It's a guardrail. Code sequences the pipeline, so the model can't skip verification, score a venue it never extracted, or write to the tracker on its own. The agency sits inside that frame, in discovery. There, a hand-written tool loop gives Claude four web and decision tools: `web_search`, `web_fetch`, `record_result` (a verdict on each result) and `accept_candidate`. Claude picks each next action based on what it just found: refine a query, fetch a promising page, reject a stale or off-topic result, or accept a live call. Discovery runs in two phases, also sequenced by code:
+
+1. **Probe phase.** One search into each bucket the paper is *not* in: three probes for a paper in one bucket. The classification is a guess made from the paper alone, so the probes let real venues test it. A live call found here can be accepted.
+2. **Main phase.** Searches in the paper's own bucket, with whatever budget the probes left.
+
+Both phases share the same 12-turn cap. The probe phase may use at most 4 of those turns, so it can't starve the main searches.
 
 **Scoring is judgment, not thresholds.** Classify and judge-fit read the paper and the venue's page and weigh them against qualitative rubric questions. Does the venue want work on this subject? Does it publish this kind of writing for this kind of reader? Can the paper be submitted in a form it accepts? No dimension is a keyword match or a formula. Code computes only the overall score, as the plain average of the dimensions. Judge-fit uses two separate calls so the venue's bucket can only affect genre fit: the theme and format call is never told the bucket.
+
+**Buckets and rubric.** Every venue is scored on theme, genre and format fit. Theme and format mean the same thing in every bucket; genre fit changes with the bucket ([`src/judge_fit.py`](src/judge_fit.py)):
+
+| Bucket | What genre fit looks at |
+|---|---|
+| Academic & Practitioner | Research rigor and method: would the venue's reviewers accept the paper's level of evidence? |
+| Industry & Technical Media | Voice and register: does the outlet publish writing that sounds like the paper? |
+| Corporate & Institutional | Audience: would policymakers or executives find the paper usable? |
+| Other Avenues | No genre or format score. Theme fit only, plus a written reason why no other bucket fit. Flagged as low confidence in the digest. |
+
+The overall score is the simple average of a bucket's dimension scores, computed in code ([`src/tracker_schema.py`](src/tracker_schema.py)). The model never produces it.
 
 Discovery and extraction run on Claude Haiku 4.5. Classify and judge-fit run on Claude Sonnet 5 ([`src/config.py`](src/config.py)).
 
@@ -142,7 +163,10 @@ python -m src.demo                       # replay the latest saved traces, no AP
 
 Only `applying`, `applied` and `skipped` are allowed:
 
-- **Status changes:** `applied` and `skipped` close the venue; `applying` keeps reminders coming whatever the score.
+- **`applying`:** the venue stays open. Every monthly run re-checks its page, and it gets a week-before reminder and a place in the digest's still-open list whatever its score. The daily watcher won't close it after the deadline; it stays until you change the line.
+- **`applied`:** the venue is closed for you. No more re-checks, reminders or still-open listing, and discovery won't pick it up again.
+- **`skipped`:** same effect as `applied`: closed, with no re-checks, reminders or still-open listing. The two differ only in the label kept in the tracker, as a record of what you did.
+- **Removing a line** puts the venue back to `pending`.
 - **Errors:** any other value, or a repeated key, stops the run with an error naming the line.
 - **Unknown IDs:** a line whose ID isn't tracked produces a warning, and the line is ignored.
 - **No line:** a venue with no line stays `pending`.
@@ -181,11 +205,19 @@ The committed `traces/` from the October monthly runs show quote verification on
 These are enforced in code:
 
 - **Two live profiles at most.** The loader refuses to run with more ([`src/profile_schema.py`](src/profile_schema.py)).
-- **Search-loop limits, per paper per run** ([`src/config.py`](src/config.py)):
-  - 12 turns, 6 searches (3 probe, 3 main), 4 fetches of at most 5,000 tokens each, 2 accepted candidates
-  - $0.22 of estimated loop spend
-  - The probe phase has its own smaller caps (4 turns, 2 fetches, half the spend), so it can't starve the main searches.
-  - The loop stops *before* a turn projected to cross the spend limit. The main phase's first turn always runs, so the loop can overshoot by one turn.
+- **Limits, per paper per run** ([`src/config.py`](src/config.py)):
+
+  | Limit | Value | Probe phase's share |
+  |---|---|---|
+  | Turns | 12 | up to 4 |
+  | Searches | 6 | 3 (one per other bucket); main gets the rest, so up to 3 |
+  | Fetches | 4, at most 5,000 tokens each | up to 2 |
+  | Search-loop spend | $0.22 estimated; can run one turn over | up to half |
+  | Venues accepted | 2 | shared |
+  | Live profiles | 2 | — |
+  | Total spending | Anthropic Console monthly spending cap: the only hard stop | — |
+
+  The loop stops *before* a turn projected to cross the spend limit. The main phase's first turn always runs, so the loop can overshoot by one turn.
 - **Refusals of bad decisions** ([`src/discover.py`](src/discover.py)). Code refuses:
   - `live_cfp` or `accept_candidate` for a page not fetched in this run, or one that came back unreadable (under 300 characters)
   - a deadline quote that isn't on the page, or a deadline that has passed
@@ -219,13 +251,14 @@ The code was implemented with Claude Code under my design and direction. Claude 
 - **Model judgment varies between runs.** The status log in [`docs/project-brief.md`](docs/project-brief.md) records the discovery model judging the same call differently on different runs.
 - **Live web results vary.** The same paper can surface different venues from one run to the next, and publisher sites sometimes block or rate-limit fetches.
 - **Two profiles at most.** This is a deliberate cost cap.
-- **Two candidates per paper per run.** Discovery stops after two accepted calls, so some months may miss venues.
+- **First two, not best two.** Discovery keeps the first two venues it can verify and then stops. They aren't compared against anything else found that month, so a better-fitting call can be missed.
 - **Decisions are edited by hand in JSON.** One decision per conference applies to every profile matched to it.
 - **Listing pages.** Discovery can accept a listing page (a journal's collections page, say) instead of a call's own page. One URL then carries several deadlines.
 - **Rolling calls.** Calls with no deadline are never closed automatically.
 
 ## Next steps
 
+- **Rebuild discovery to keep the best two.** Scan widely each month, then keep the top two candidates, instead of stopping at the first two verified.
 - **A dashboard** listing tracked venues, with a decision dropdown per venue to replace hand-editing `decisions.json`.
 - **A formal eval set.** A small answer-key set for classify and extraction, plus repeat-run checks for stability.
 - **Learning from decisions, only with permission.** Cicadas could notice patterns in what gets skipped (every European venue, say) and *propose* a scoring change. It would always ask before changing how anything is scored, never adjust silently.
